@@ -12,6 +12,7 @@ dbp==18.12.3
 debugpy==1.8.20
 decorator==5.2.1
 docker==7.1.0
+entsoe-py
 executing==2.2.1
 fonttools==4.61.1
 geopandas==1.1.2
@@ -26,12 +27,14 @@ joblib==1.5.3
 jupyter_client==8.8.0
 jupyter_core==5.9.1
 kiwisolver==1.4.9
+lightgbm==4.6.0
+lightning
 mapclassify==2.10.0
 matplotlib==3.10.8
 matplotlib-inline==0.2.1
 nest-asyncio==1.6.0
 networkx==3.6.1
-numpy==2.4.2
+numpy==1.26.4  # pinned <2: torch 2.2.2 (last Intel-macOS wheel) is incompatible with NumPy 2.x
 packaging==26.0
 pandas==2.3.3
 parso==0.8.6
@@ -49,6 +52,7 @@ pyparsing==3.3.2
 pyproj==3.7.2
 python-dateutil==2.9.0.post0
 python-debian==1.1.0
+pytorch-forecasting
 pytz==2025.2
 pyzmq==27.1.0
 requests==2.32.5
@@ -58,9 +62,11 @@ shapely==2.1.2
 six==1.17.0
 stack-data==0.6.3
 threadpoolctl==3.6.0
+torch
 tornado==6.5.4
 traitlets==5.14.3
 tzdata==2025.3
 urllib3==2.6.3
 wcwidth==0.6.0
 xlrd==1.2.0
+yfinance
