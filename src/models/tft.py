@@ -18,6 +18,8 @@ une RuntimeError explicite plutôt que de casser l'import du reste du projet.
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 
@@ -53,6 +55,69 @@ try:  # imports lourds, optionnels
 
     _TFT_AVAILABLE = True
     _IMPORT_ERROR = None
+
+    class _EpochLogger(pl.Callback):
+        """Callback de logging : trace chaque époque (pertes, chrono, ETA).
+
+        Le Trainer tourne avec logger=False, donc sans ce callback on n'a aucune
+        trace persistante de l'entraînement (juste la barre de progression, qui
+        s'efface). Ici on imprime une ligne par époque, lisible aussi dans un
+        notebook ou un fichier de log.
+        """
+
+        def __init__(self, max_epochs: int):
+            self.max_epochs = max_epochs
+            self._fit_t0 = 0.0
+            self._epoch_t0 = 0.0
+            self._epoch_secs: list[float] = []
+
+        @staticmethod
+        def _metric(trainer, key: str) -> float:
+            v = trainer.callback_metrics.get(key)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float("nan")
+
+        def on_fit_start(self, trainer, pl_module):
+            self._fit_t0 = time.perf_counter()
+            print(f"[learn_tft] >>> Entraînement démarré ({self.max_epochs} époques max)")
+
+        def on_train_epoch_start(self, trainer, pl_module):
+            self._epoch_t0 = time.perf_counter()
+
+        def on_validation_epoch_end(self, trainer, pl_module):
+            # Appelé après chaque validation ; on saute la sanity-check du début.
+            if trainer.sanity_checking:
+                return
+            now = time.perf_counter()
+            epoch = trainer.current_epoch + 1
+            dt = now - self._epoch_t0
+            self._epoch_secs.append(dt)
+            elapsed = now - self._fit_t0
+            avg = sum(self._epoch_secs) / len(self._epoch_secs)
+            eta = avg * max(0, self.max_epochs - epoch)
+            train_loss = self._metric(trainer, "train_loss_epoch")
+            if np.isnan(train_loss):  # pas encore agrégé à la 1re époque
+                train_loss = self._metric(trainer, "train_loss_step")
+            val_loss = self._metric(trainer, "val_loss")
+            print(
+                f"[learn_tft] Époque {epoch:>3}/{self.max_epochs} | "
+                f"train_loss={train_loss:7.4f} val_loss={val_loss:7.4f} | "
+                f"{dt:5.1f}s/époque | écoulé {elapsed/60:5.1f} min | "
+                f"ETA ~{eta/60:5.1f} min",
+                flush=True,
+            )
+
+        def on_fit_end(self, trainer, pl_module):
+            total = time.perf_counter() - self._fit_t0
+            n = trainer.current_epoch + 1
+            print(
+                f"[learn_tft] <<< Entraînement terminé : {n} époques en "
+                f"{total/60:.1f} min ({total/max(n,1):.1f}s/époque en moyenne)",
+                flush=True,
+            )
+
 except Exception as exc:  # ImportError, ou erreur de compat
     _TFT_AVAILABLE = False
     _IMPORT_ERROR = exc
@@ -75,9 +140,26 @@ _TFT_PARAMS = dict(
     dropout=0.1,
     hidden_continuous_size=16,
 )
+# Variante "rapide" (fast=True) — modèle plus léger pour les longs historiques
+# (≈10 ans) et le CPU : ~4x moins de paramètres, donc un temps/époque très
+# inférieur, au prix d'un peu de capacité. À coupler avec meteo_mode="national".
+_TFT_PARAMS_FAST = dict(
+    learning_rate=0.05,
+    hidden_size=16,
+    attention_head_size=2,
+    dropout=0.1,
+    hidden_continuous_size=8,
+)
 _MAX_EPOCHS = 40
 _BATCH_SIZE = 128
 _EARLYSTOP_PATIENCE = 6
+
+# Taille (en jours) de la fenêtre de contexte de l'encodeur, selon le mode.
+# Le mode rapide raccourcit le contexte (3 j au lieu de 7) -> encodeur LSTM
+# plus court, donc moins de calcul par batch.
+_ENCODER_DAYS = 7
+_ENCODER_DAYS_FAST = 3
+_FAST_BATCH_SIZE = 256  # batch plus large en mode rapide : moins d'overhead Python
 
 
 def _build_long_df(data: pd.DataFrame, meteo_mode: str, drop_missing_price: bool):
@@ -131,16 +213,37 @@ def _make_dataset(df: pd.DataFrame, feature_cols, max_encoder_length, max_predic
     )
 
 
-def learn_tft(data: pd.DataFrame, meteo_mode: str = "department", n_splits: int = 5) -> dict:
+def learn_tft(
+    data: pd.DataFrame,
+    meteo_mode: str = "department",
+    n_splits: int = 5,
+    fast: bool = True,
+) -> dict:
     # Entraîne un Temporal Fusion Transformer. n_splits sert ici à dimensionner la
     # taille du holdout temporel d'évaluation (pas un vrai CV : trop coûteux en TFT).
+    #
+    # fast=True (défaut) : mode rapide, pensé pour les longs historiques (≈10 ans)
+    # et le CPU. Il force la météo NATIONALE (≈30 covariables au lieu de ≈500 en
+    # mode 'department'), raccourcit la fenêtre de contexte (cf. _ENCODER_DAYS_FAST),
+    # élargit le batch et allège le modèle (cf. _TFT_PARAMS_FAST). Plusieurs fois
+    # plus rapide par époque. fast=False rétablit le TFT "pleine capacité".
     _require_tft()
-    print(f"[learn_tft] Démarrage TFT — meteo_mode={meteo_mode}, {len(data)} lignes")
+
+    if fast and meteo_mode == "department":
+        print("[learn_tft] Mode rapide -> météo forcée en 'national' "
+              "(au lieu de 'department', ~500 covariables -> ~30)")
+        meteo_mode = "national"
+    params = _TFT_PARAMS_FAST if fast else _TFT_PARAMS
+    encoder_days = _ENCODER_DAYS_FAST if fast else _ENCODER_DAYS
+    batch_size = _FAST_BATCH_SIZE if fast else _BATCH_SIZE
+
+    print(f"[learn_tft] Démarrage TFT — fast={fast}, meteo_mode={meteo_mode}, "
+          f"{len(data)} lignes")
 
     freq_tag = _infer_freq_tag(data["time"])
     steps_per_day = 96 if freq_tag == "15min" else 24
-    max_encoder_length = 7 * steps_per_day      # 1 semaine de contexte
-    max_prediction_length = steps_per_day       # horizon : 1 jour
+    max_encoder_length = encoder_days * steps_per_day  # fenêtre de contexte
+    max_prediction_length = steps_per_day              # horizon : 1 jour
 
     df, feature_cols = _build_long_df(data, meteo_mode, drop_missing_price=True)
     print(f"[learn_tft] {len(df)} pas de temps, {len(feature_cols)} covariables, pas={freq_tag}")
@@ -158,17 +261,32 @@ def learn_tft(data: pd.DataFrame, meteo_mode: str = "department", n_splits: int 
     validation = TimeSeriesDataSet.from_dataset(
         training, df, predict=True, stop_randomization=True,
     )
-    train_loader = training.to_dataloader(train=True, batch_size=_BATCH_SIZE, num_workers=0)
-    val_loader = validation.to_dataloader(train=False, batch_size=_BATCH_SIZE, num_workers=0)
+    train_loader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
+    val_loader = validation.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+
+    n_train = len(train_loader.dataset)
+    n_val = len(val_loader.dataset)
+    n_batches = int(np.ceil(n_train / batch_size))
+    print(
+        f"[learn_tft] {n_train} fenêtres d'entraînement, {n_val} de validation | "
+        f"batch_size={batch_size} -> {n_batches} batches/époque"
+    )
 
     tft = TemporalFusionTransformer.from_dataset(
-        training, loss=QuantileLoss(), log_interval=0, **_TFT_PARAMS,
+        training, loss=QuantileLoss(), log_interval=0, **params,
+    )
+    print(
+        f"[learn_tft] TFT instancié : {sum(p.numel() for p in tft.parameters()):,} "
+        f"paramètres, accelerator=auto"
     )
     trainer = pl.Trainer(
         max_epochs=_MAX_EPOCHS,
         accelerator="auto",
         gradient_clip_val=0.1,
-        callbacks=[EarlyStopping(monitor="val_loss", patience=_EARLYSTOP_PATIENCE, mode="min")],
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=_EARLYSTOP_PATIENCE, mode="min"),
+            _EpochLogger(_MAX_EPOCHS),
+        ],
         enable_progress_bar=True,
         logger=False,
         enable_checkpointing=False,
@@ -194,6 +312,7 @@ def learn_tft(data: pd.DataFrame, meteo_mode: str = "department", n_splits: int 
         "model_type": "TFT",
         "feature_cols": feature_cols,
         "meteo_mode": meteo_mode,
+        "fast": bool(fast),
         "freq": freq_tag,
         "start": pd.to_datetime(data["time"]).min().strftime("%Y%m%d"),
         "end": pd.to_datetime(data["time"]).max().strftime("%Y%m%d"),
@@ -226,8 +345,11 @@ def predict_tft(model_bundle: dict, data: pd.DataFrame) -> pd.Series:
         training, df, predict=False, stop_randomization=True,
     )
     loader = dataset.to_dataloader(train=False, batch_size=_BATCH_SIZE, num_workers=0)
-    raw, index = model.predict(loader, mode="prediction", return_index=True)
-    raw = np.asarray(raw)  # (n_fenetres, horizon)
+    # pytorch-forecasting 1.x : predict() renvoie un namedtuple Prediction
+    # (output, x, index, decoder_lengths, y) -> on accède aux champs par nom.
+    prediction = model.predict(loader, mode="prediction", return_index=True)
+    raw = np.asarray(prediction.output)  # (n_fenetres, horizon)
+    index = prediction.index
 
     # Chaque fenêtre démarre au time_idx donné par 'index' ; on rabat la prédiction
     # sur les time_idx correspondants. En cas de recouvrement, on garde la dernière.

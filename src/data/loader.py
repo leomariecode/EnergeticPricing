@@ -646,7 +646,7 @@ def _fetch_meteo(
 
         if r.status_code == 429:
             retry_after = r.headers.get("Retry-After")
-            wait = int(retry_after) if retry_after and retry_after.isdigit() else min(10 * attempt, 300)
+            wait = int(retry_after) if retry_after and retry_after.isdigit() else min(180 * attempt, 300)
             print(
                 f"[_fetch_meteo] HTTP 429 (rate-limit) tentative {attempt}/{max_retries}, "
                 f"attente {wait}s..."

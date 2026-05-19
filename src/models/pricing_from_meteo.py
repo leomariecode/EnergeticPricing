@@ -1,4 +1,14 @@
 from pathlib import Path
+
+# IMPORTANT (macOS x86_64) : charger l'OpenMP de LightGBM *puis* celui de PyTorch
+# fait segfaulter le process — deux runtimes OpenMP incompatibles cohabitent. Si
+# PyTorch est installé (chemin TFT), on l'importe ICI, avant LightGBM, pour que
+# son runtime OpenMP soit initialisé en premier. No-op si torch est absent.
+try:  # pragma: no cover - dépend de l'environnement
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 import holidays
 import joblib
 import lightgbm as lgb
@@ -138,20 +148,27 @@ def model_learn(
     model_type: str,
     n_splits: int = 5,
     meteo_mode: str = "department",
+    fast: bool = True,
 ):
     # Cache : si un modèle a déjà été entraîné sur la même plage / type / fréquence
     # / mode météo, on le recharge.
+    # fast : ne concerne que le TFT (cf. learn_tft) — mode rapide pour les longs
+    # historiques. En mode rapide la météo est forcée en 'national' : on le reflète
+    # dans le tag de cache pour ne pas collisionner avec un run 'department'.
     print(f"[model_learn] Démarrage : model_type={model_type}, meteo_mode={meteo_mode}, "
           f"{len(data)} lignes en entrée")
     start = pd.to_datetime(data["time"]).min().strftime("%Y%m%d")
     end = pd.to_datetime(data["time"]).max().strftime("%Y%m%d")
     freq_tag = _infer_freq_tag(data["time"])
-    meteo_tag = "dept" if meteo_mode == "department" else "nat"
+    tft_fast = (model_type == "TFT") and fast
+    effective_meteo_mode = "national" if tft_fast else meteo_mode
+    meteo_tag = "dept" if effective_meteo_mode == "department" else "nat"
     print(f"[model_learn] Plage temporelle : {start} -> {end} (pas={freq_tag}, météo={meteo_tag})")
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    fast_tag = "_fast" if tft_fast else ""
     cache_path = MODEL_DIR / (
-        f"pricing_from_meteo_{model_type}_{start}_{end}_{freq_tag}_{meteo_tag}.pkl"
+        f"pricing_from_meteo_{model_type}_{start}_{end}_{freq_tag}_{meteo_tag}{fast_tag}.pkl"
     )
 
     if cache_path.exists():
@@ -164,7 +181,7 @@ def model_learn(
     # Le TFT a un pipeline d'entraînement à part (séquentiel, PyTorch).
     if model_type == "TFT":
         from src.models.tft import learn_tft
-        bundle = learn_tft(data, meteo_mode=meteo_mode, n_splits=n_splits)
+        bundle = learn_tft(data, meteo_mode=meteo_mode, n_splits=n_splits, fast=fast)
         joblib.dump(bundle, cache_path)
         print(f"[model_learn] Modèle TFT sauvegardé : {cache_path}")
         return bundle
@@ -576,9 +593,11 @@ def _meteo_cols_of(df: pd.DataFrame) -> list[str]:
     return [c for c in METEO_FEATURES if c in df.columns]
 
 
-# Vitesse de vent (m/s) au-delà de laquelle une éolienne est à puissance nominale :
-# on écrête là pour ne pas faire exploser le cube au-dessus du régime nominal.
-_WIND_RATED_SPEED = 12.0
+# Plafond (m/s) appliqué à la vitesse de vent avant de la cuber dans wind_potential.
+# Réglé très haut (≈ aucun écrêtage) : config 'cap_declip' retenue. On laisse
+# LightGBM apprendre lui-même la saturation de la courbe de puissance plutôt que
+# de l'imposer à 12 m/s — ça préserve mieux les creux de prix par vent fort.
+_WIND_RATED_SPEED = 100.0
 
 
 def _renewable_potential(data: pd.DataFrame) -> pd.DataFrame | None:
