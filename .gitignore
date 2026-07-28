@@ -1,2 +1,17 @@
-envEnergyPricing
-data
+# Environnements virtuels
+.venv/
+envEnergyPricing/
+
+# Données (volumineuses, non versionnées) sauf les référentiels géographiques
+data/*
+!data/Geographie/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# macOS / IDE
+.DS_Store
+.vscode/
+

@@ -1,72 +1,34 @@
-appnope==0.1.4
-asttokens==3.0.1
-certifi==2026.1.4
-charset-normalizer==3.4.4
-click==8.3.1
-colorama==0.4.6
-comm==0.2.3
-contourpy==1.3.3
-controlgraph==0.7.1
-cycler==0.12.1
-dbp==18.12.3
-debugpy==1.8.20
-decorator==5.2.1
-docker==7.1.0
-entsoe-py
-executing==2.2.1
-fonttools==4.61.1
-geopandas==1.1.2
-holidays==0.96
-homebrew==0.0.0.1
-idna==3.11
-ipykernel==7.2.0
-ipython==9.10.0
-ipython_pygments_lexers==1.1.1
-jedi==0.19.2
-joblib==1.5.3
-jupyter_client==8.8.0
-jupyter_core==5.9.1
-kiwisolver==1.4.9
-lightgbm==4.6.0
-lightning
-mapclassify==2.10.0
-matplotlib==3.10.8
-matplotlib-inline==0.2.1
-nest-asyncio==1.6.0
-networkx==3.6.1
-numpy==1.26.4  # pinned <2: torch 2.2.2 (last Intel-macOS wheel) is incompatible with NumPy 2.x
-packaging==26.0
-pandas==2.3.3
-parso==0.8.6
-pexpect==4.9.0
-pillow==12.1.1
-platformdirs==4.9.2
-prompt_toolkit==3.0.52
-psutil==7.2.2
-ptyprocess==0.7.0
-pure_eval==0.2.3
-pydot==4.0.1
-Pygments==2.19.2
-pyogrio==0.12.1
-pyparsing==3.3.2
-pyproj==3.7.2
-python-dateutil==2.9.0.post0
-python-debian==1.1.0
-pytorch-forecasting
-pytz==2025.2
-pyzmq==27.1.0
-requests==2.32.5
-scikit-learn==1.8.0
-scipy==1.17.0
-shapely==2.1.2
-six==1.17.0
-stack-data==0.6.3
-threadpoolctl==3.6.0
+# Dépendances directes du projet. Les transitives sont résolues par pip.
+# Versions exactes reproductibles : voir requirements.lock.txt
+
+# --- Données / calcul ---
+numpy
+pandas
+pyarrow         # moteur parquet pour le cache de src/data/loader.py
+scipy
+scikit-learn
+
+# --- Données géo ---
+geopandas
+mapclassify
+shapely
+pyproj
+
+# --- Sources de données externes ---
+cdsapi          # ERA5 / Copernicus Climate Data Store
+xarray          # lecture des NetCDF ERA5
+entsoe-py       # prix & charge marché électrique
+holidays
+
+# --- Modèles ---
 torch
-tornado==6.5.4
-traitlets==5.14.3
-tzdata==2025.3
-urllib3==2.6.3
-wcwidth==0.6.0
-xlrd==1.2.0
-yfinance
+lightning
+pytorch-forecasting
+lightgbm
+joblib
+
+# --- Visualisation ---
+matplotlib
+
+# --- Notebooks ---
+ipykernel

@@ -1,0 +1,101 @@
+REG;Région;DEP;Département;NBARR;NBCAN;NBCOM;PMUN;PTOT
+84;Auvergne-Rhône-Alpes;01;Ain;4;23;391;679344;694945
+32;Hauts-de-France;02;Aisne;5;21;797;523342;534380
+84;Auvergne-Rhône-Alpes;03;Allier;3;19;317;333298;341713
+93;Provence-Alpes-Côte d'Azur;04;Alpes-de-Haute-Provence;4;15;198;168054;172385
+93;Provence-Alpes-Côte d'Azur;05;Hautes-Alpes;2;15;162;143467;147756
+93;Provence-Alpes-Côte d'Azur;06;Alpes-Maritimes;2;27;163;1128418;1142503
+84;Auvergne-Rhône-Alpes;07;Ardèche;3;17;335;334231;342599
+44;Grand Est;08;Ardennes;4;19;447;265893;271604
+76;Occitanie;09;Ariège;3;13;325;155722;159684
+44;Grand Est;10;Aube;3;17;431;310447;317296
+76;Occitanie;11;Aude;3;19;433;379648;387874
+76;Occitanie;12;Aveyron;3;23;285;279609;289413
+93;Provence-Alpes-Côte d'Azur;13;Bouches-du-Rhône;4;29;119;2087658;2112170
+28;Normandie;14;Calvados;4;25;526;709441;722979
+84;Auvergne-Rhône-Alpes;15;Cantal;3;15;250;144196;148813
+75;Nouvelle-Aquitaine;16;Charente;3;19;359;352683;361286
+75;Nouvelle-Aquitaine;17;Charente-Maritime;5;27;462;672279;688067
+24;Centre-Val de Loire;18;Cher;3;19;286;298660;305233
+75;Nouvelle-Aquitaine;19;Corrèze;3;19;277;240826;248289
+27;Bourgogne-Franche-Comté;21;Côte-d'Or;3;23;698;540100;551336
+53;Bretagne;22;Côtes-d'Armor;4;27;344;611859;629517
+75;Nouvelle-Aquitaine;23;Creuse;2;15;255;115527;118760
+75;Nouvelle-Aquitaine;24;Dordogne;4;25;503;417614;427558
+27;Bourgogne-Franche-Comté;25;Doubs;3;19;563;547163;560477
+84;Auvergne-Rhône-Alpes;26;Drôme;3;19;362;524207;536948
+28;Normandie;27;Eure;3;23;585;602714;616217
+24;Centre-Val de Loire;28;Eure-et-Loir;4;15;363;433129;443227
+53;Bretagne;29;Finistère;4;27;277;933455;957671
+94;Corse;2A;Corse-du-Sud;2;11;124;168306;170548
+94;Corse;2B;Haute-Corse;3;15;236;187180;189722
+76;Occitanie;30;Gard;3;23;350;770940;784471
+76;Occitanie;31;Haute-Garonne;3;27;586;1471468;1494734
+76;Occitanie;32;Gers;3;17;458;192645;198955
+75;Nouvelle-Aquitaine;33;Gironde;6;33;534;1690493;1716986
+76;Occitanie;34;Hérault;3;25;341;1230289;1248501
+53;Bretagne;35;Ille-et-Vilaine;4;27;332;1120666;1145286
+24;Centre-Val de Loire;36;Indre;4;13;241;216069;221574
+24;Centre-Val de Loire;37;Indre-et-Loire;3;19;272;619362;631334
+84;Auvergne-Rhône-Alpes;38;Isère;3;29;512;1298990;1324225
+27;Bourgogne-Franche-Comté;39;Jura;3;17;492;257973;266940
+75;Nouvelle-Aquitaine;40;Landes;2;15;327;433570;445828
+24;Centre-Val de Loire;41;Loir-et-Cher;3;15;267;328543;337089
+84;Auvergne-Rhône-Alpes;42;Loire;3;21;320;774133;788024
+84;Auvergne-Rhône-Alpes;43;Haute-Loire;3;19;257;228654;235575
+52;Pays de la Loire;44;Loire-Atlantique;3;31;207;1487570;1517043
+24;Centre-Val de Loire;45;Loiret;3;21;325;691268;705712
+76;Occitanie;46;Lot;3;17;312;176473;181747
+75;Nouvelle-Aquitaine;47;Lot-et-Garonne;4;21;319;333602;341487
+76;Occitanie;48;Lozère;2;13;152;76486;79964
+52;Pays de la Loire;49;Maine-et-Loire;4;21;176;833776;853768
+28;Normandie;50;Manche;4;27;445;497522;512167
+44;Grand Est;51;Marne;4;23;610;563076;574142
+44;Grand Est;52;Haute-Marne;3;17;426;168331;172981
+52;Pays de la Loire;53;Mayenne;3;17;240;305468;314446
+44;Grand Est;54;Meurthe-et-Moselle;4;23;591;732236;743353
+44;Grand Est;55;Meuse;3;17;499;180290;185178
+53;Bretagne;56;Morbihan;3;21;249;783390;804597
+44;Grand Est;57;Moselle;5;27;725;1051309;1068899
+27;Bourgogne-Franche-Comté;58;Nièvre;4;17;309;201417;206356
+32;Hauts-de-France;59;Nord;6;41;647;2615635;2645946
+32;Hauts-de-France;60;Oise;4;21;680;829899;846757
+28;Normandie;61;Orne;3;21;381;275201;282417
+32;Hauts-de-France;62;Pas-de-Calais;7;39;887;1457905;1479365
+84;Auvergne-Rhône-Alpes;63;Puy-de-Dôme;5;31;463;664453;678624
+75;Nouvelle-Aquitaine;64;Pyrénées-Atlantiques;3;27;545;706564;725655
+76;Occitanie;65;Hautes-Pyrénées;3;17;469;231349;237032
+76;Occitanie;66;Pyrénées-Orientales;3;17;226;496855;504938
+44;Grand Est;67;Bas-Rhin;5;23;514;1163810;1178940
+44;Grand Est;68;Haut-Rhin;4;17;366;770738;784356
+84;Auvergne-Rhône-Alpes;69;Rhône;2;13;266;1914667;1940015
+27;Bourgogne-Franche-Comté;70;Haute-Saône;2;17;536;233185;239102
+27;Bourgogne-Franche-Comté;71;Saône-et-Loire;5;29;563;550310;564938
+52;Pays de la Loire;72;Sarthe;3;21;352;566733;579227
+84;Auvergne-Rhône-Alpes;73;Savoie;3;19;273;448226;460217
+84;Auvergne-Rhône-Alpes;74;Haute-Savoie;4;17;279;861158;881729
+11;Île-de-France;75;Paris;1;;1;2103778;2119412
+28;Normandie;76;Seine-Maritime;3;35;707;1260964;1281667
+11;Île-de-France;77;Seine-et-Marne;5;23;507;1468108;1484180
+11;Île-de-France;78;Yvelines;4;21;259;1485086;1508510
+75;Nouvelle-Aquitaine;79;Deux-Sèvres;3;17;252;375229;385771
+32;Hauts-de-France;80;Somme;4;23;771;565413;575371
+76;Occitanie;81;Tarn;2;23;314;397352;407233
+76;Occitanie;82;Tarn-et-Garonne;2;15;195;265817;271650
+93;Provence-Alpes-Côte d'Azur;83;Var;3;23;153;1119307;1135585
+93;Provence-Alpes-Côte d'Azur;84;Vaucluse;3;17;151;572056;582656
+52;Pays de la Loire;85;Vendée;3;17;253;713609;732903
+75;Nouvelle-Aquitaine;86;Vienne;3;19;265;438897;449082
+75;Nouvelle-Aquitaine;87;Haute-Vienne;3;21;195;373167;379464
+44;Grand Est;88;Vosges;3;17;506;357248;367295
+27;Bourgogne-Franche-Comté;89;Yonne;3;21;423;332267;340359
+27;Bourgogne-Franche-Comté;90;Territoire de Belfort;1;9;101;140255;143144
+11;Île-de-France;91;Essonne;3;21;194;1338485;1351891
+11;Île-de-France;92;Hauts-de-Seine;3;23;36;1654712;1670575
+11;Île-de-France;93;Seine-Saint-Denis;3;21;39;1704316;1710659
+11;Île-de-France;94;Val-de-Marne;3;25;47;1426929;1435612
+11;Île-de-France;95;Val-d'Oise;3;21;183;1281653;1290942
+01;Guadeloupe;971;Guadeloupe;2;21;32;384160;388493
+02;Martinique;972;Martinique;4;;34;360630;364348
+03;Guyane;973;Guyane;3;;22;293996;296053
+04;La Réunion;974;La Réunion;4;25;24;889679;899660

@@ -74,15 +74,20 @@ def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
     print(f"[load_data] Démarrage : start={start}, end={end}, freq={freq}")
 
     geo_path = DATA_DIR / "Geographie" / "departements.geojson"
-    pop_path = DATA_DIR / "Geographie" / "pop_dep.csv"
+    pop_path = DATA_DIR / "Geographie" / "donnees_departements.csv"
     pref_path = DATA_DIR / "Geographie" / "prefectures_france.csv"
 
     print(f"[load_data] Lecture du geojson : {geo_path}")
     departements = gpd.read_file(geo_path)
     DEP_CODE = [str(i).zfill(2) for i in range(1, 96) if i != 20] + ["2A", "2B"]
     departements = departements[departements["code"].isin(DEP_CODE)]
-    pop_dep = pd.read_csv(pop_path,sep=";")
-    departements = departements.merge(pop_dep,on="code")
+    # Fichier INSEE : DEP = code département ("01".."95", "2A"/"2B"),
+    # PMUN = population municipale (référence légale), PTOT = population totale.
+    pop_dep = pd.read_csv(pop_path, sep=";", dtype={"DEP": str})
+    pop_dep = pop_dep.rename(columns={"DEP": "code", "PMUN": "population"})[
+        ["code", "population"]
+    ]
+    departements = departements.merge(pop_dep, on="code")
     print(f"[load_data] {len(departements)} départements à traiter")
 
     # Coordonnées de la préfecture par département : on interroge Open-Meteo sur le
