@@ -23,3 +23,7 @@ __pycache__/
 # macOS / IDE
 .DS_Store
 .vscode/
+
+# Logs de run
+*.log
+*.log.err

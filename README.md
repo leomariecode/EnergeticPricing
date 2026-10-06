@@ -1,93 +1,88 @@
-# EnergeticPricing
+# EnergeticPricing: forecasting French day-ahead power prices
 
+Machine-learning model that forecasts the 24 hourly prices of the French day-ahead auction (EPEX Spot FR) for day D+1, using **only information available before gate closure (D-1, 12:00 CET)**.
 
+📄 **[Project report (PDF, 3 pages)](reports/EnergeticPricing_report.pdf)**: data, methodology, results, limitations.
 
-## Getting started
+## Results
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Rolling-origin backtest, Jan 2023 – May 2026, 5 expanding folds, hourly MAE in EUR/MWh:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| Model | MAE, all folds | MAE, folds with ≥ 18 months of training |
+|---|---|---|
+| Naive: same hour D-1 | 21.7 | 22.3 |
+| Ridge, weather + ENTSO-E forecasts + gas | 23.0 | 17.7 |
+| **LightGBM, + installed capacity (main model)** | **20.5** | **16.5 (−26% vs naive)** |
+| LightGBM + neighbour prices *(leaky upper bound)* | 11.4 | 11.4 |
 
-## Add your files
+![MAE by model](reports/figures/mae.png)
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Key takeaways:
+
+- **The model beats persistence by 26%** once it has seen a full seasonal cycle. With less than about a year of history it does not beat persistence.
+- **Capacity-weighted renewable potential** is the most valuable feature block. It is built from the national installation registry × local weather in each of the 96 départements.
+- **Neighbour day-ahead prices are look-ahead leakage.** They clear simultaneously with France (EUPHEMIA coupling). Including them inflates R² from 0.50 to 0.79, so they are excluded from the forecasting models.
+
+## Data
+
+| Source | Content |
+|---|---|
+| [ENTSO-E Transparency Platform](https://transparency.entsoe.eu) | FR day-ahead price (target), day-ahead load / wind / solar forecasts, neighbour prices |
+| [Open-Meteo](https://open-meteo.com) | Hourly weather (ERA5 archive + forecast) for the 96 départements |
+| [ODRE national registry](https://odre.opendatasoft.com/explore/dataset/registre-national-installation-production-stockage-electricite-agrege/) | Solar and wind capacity per département with commissioning dates |
+| Yahoo Finance (`TTF=F`) | TTF gas front-month, lagged 2 days |
+| INSEE, `holidays` | Population per département, French public holidays |
+
+## Methodology
+
+- **No look-ahead.** Every feature is aligned with what is known at D-1 noon: price lags D-1/D-7, gas settlement D-2, day-ahead forecasts only.
+- **Features from market structure.** Residual load (load − wind − solar) and its ramps, renewable potential = Σ capacity × radiation or wind speed³, département-level weather (480 columns), calendar and holidays.
+- **Validation.** `TimeSeriesSplit` with 5 expanding folds. LightGBM early-stops on the tail of the *training* window. Naive benchmarks are scored on the same folds.
+- **Models.** Ridge (linear baseline) and LightGBM, plus an auxiliary spike classifier. A Temporal Fusion Transformer (quantile loss) is also implemented in [src/models/tft.py](src/models/tft.py).
+
+## Project structure
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/leomarie-group/EnergeticPricing.git
-git branch -M main
-git push -uf origin main
+src/
+  data/loader.py              data collection (ENTSO-E, Open-Meteo, TTF, registry) + parquet cache
+  models/pricing_from_meteo.py feature engineering, training, rolling CV, prediction
+  models/tft.py               Temporal Fusion Transformer (optional, PyTorch)
+  market/market.py            EnergyMarket: high-level API (load → learn → predict a day)
+experiments/
+  run_ablations.py            full ablation: feature blocks × models + naive benchmarks
+  results/                    metrics per fold, last-fold predictions, feature importances
+reports/
+  build_report.py             builds the PDF report from experiments/results
+main.ipynb                    interactive walkthrough
+data/Geographie/              départements geometry, population, prefecture coordinates
 ```
 
-## Integrate with your tools
+## Reproduce
 
-* [Set up project integrations](https://gitlab.com/leomarie-group/EnergeticPricing/-/settings/integrations)
+```bash
+pip install -r requirements.txt
+cp .env.example .env            # add your ENTSO-E API key (free, on request)
+# optional, for capacity features: download the ODRE registry CSV to
+# data/ernergy_production/registre-national-installation-production-stockage-electricite-agrege.csv
+python experiments/run_ablations.py   # ~1 h the first time (API downloads are cached)
+python reports/build_report.py
+```
 
-## Collaborate with your team
+Forecast a given day from the notebook:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```python
+from src.market.market import EnergyMarket
+market = EnergyMarket(start="2023-01-01", end="2026-05-01", freq="1h")
+market.initialize()
+market.learn("LightGBM")
+market.predict_from_meteo("2026-04-28")   # up to D+3, compared with the actual price when published
+```
 
-## Test and Deploy
+## Limitations and next steps
 
-Use the built-in continuous integration in GitLab.
+- Historical weather is reanalysis (ERA5), not the D-1 forecast. Next step: train on archived forecast runs.
+- Nuclear availability (REMIT), hydro reservoir levels, interconnection capacities and CO2 price are not included yet.
+- The model only produces point forecasts. Next steps: quantile models (quantile LightGBM / TFT) scored with pinball loss, then a P&L backtest (battery arbitrage, DA vs intraday).
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+---
+Léo Marie

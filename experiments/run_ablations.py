@@ -63,7 +63,26 @@ CONFIGS = [
     dict(name="forecast_full",  neighbours=False, gas=True,  capacity=True),
     dict(name="forecast_nocap", neighbours=False, gas=True,  capacity=False),
     dict(name="forecast_base",  neighbours=False, gas=False, capacity=False),
+    # Variantes du modèle principal : météo agrégée nationalement (5 colonnes au
+    # lieu de 480) et perte L1 (moins sensible aux pics que la L2).
+    dict(name="forecast_full_national", neighbours=False, gas=True, capacity=True,
+         meteo_mode="national"),
+    dict(name="forecast_full_l1", neighbours=False, gas=True, capacity=True,
+         objective="regression_l1", models=["LightGBM"]),
 ]
+
+
+_ORIG_BUILD_MODEL = pm._build_model
+
+
+def _with_objective(objective: str | None):
+    # Remplace l'objectif LightGBM (L2 par défaut) ; sans effet sur les autres modèles.
+    def _bm(model_type):
+        model = _ORIG_BUILD_MODEL(model_type)
+        if objective and model_type == "LightGBM":
+            model.set_params(objective=objective)
+        return model
+    return _bm
 
 
 def _apply_config(data: pd.DataFrame, cfg: dict) -> pd.DataFrame:
@@ -141,16 +160,21 @@ def run():
         rows.append(b)
         print(f"[ablation] {b['model']} -> test MAE={b['test_mae']} R²={b['test_r2']}")
 
-    jobs = [(mt, cfg) for mt in MODEL_TYPES for cfg in CONFIGS]
+    jobs = [
+        (mt, cfg) for mt in MODEL_TYPES for cfg in CONFIGS
+        if mt in cfg.get("models", MODEL_TYPES)
+    ]
     for i, (model_type, cfg) in enumerate(jobs, start=1):
         tag = f"{model_type}_{cfg['name']}"
         print("#" * 72 + f"\n[ablation] ({i}/{len(jobs)}) {tag}\n" + "#" * 72)
         t0 = time.time()
         try:
             pm.MODEL_DIR = RUNS_DIR / tag
+            pm._build_model = _with_objective(cfg.get("objective"))
             bundle = model_learn(
                 _apply_config(data, cfg), model_type, n_splits=N_SPLITS,
-                meteo_mode=METEO_MODE, use_neighbour_prices=cfg["neighbours"],
+                meteo_mode=cfg.get("meteo_mode", METEO_MODE),
+                use_neighbour_prices=cfg["neighbours"],
             )
             scores = bundle.get("scores") or {}
             test, spike = scores.get("test", {}), scores.get("spike", {})
@@ -180,6 +204,7 @@ def run():
                        secs=round(time.time() - t0, 1))
         finally:
             pm.MODEL_DIR = Path("results/models")
+            pm._build_model = _ORIG_BUILD_MODEL
 
         rows.append(row)
         # Réécriture incrémentale : rien n'est perdu si interruption.
