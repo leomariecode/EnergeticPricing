@@ -29,7 +29,6 @@ from src.models.pricing_from_meteo import (
     GAS_FEATURES,
     GRADIENT_FEATURES,
     LAG_FEATURES,
-    NEIGHBOUR_PRICE_FEATURES,
     SUBHOURLY_TEMPORAL_FEATURES,
     TEMPORAL_FEATURES,
     _infer_freq_tag,
@@ -170,7 +169,7 @@ def _build_long_df(data: pd.DataFrame, meteo_mode: str, drop_missing_price: bool
 
     meteo_cols = _meteo_cols_of(df)
     fc = _select_available(df, ENTSOE_FORECAST_FEATURES)
-    nb = _select_available(df, NEIGHBOUR_PRICE_FEATURES)
+    nb = []  # prix voisins exclus : inconnus en prévision J-1 (cf. model_learn)
     gas = _select_available(df, GAS_FEATURES)
     cap = _select_available(df, CAPACITY_FEATURES)
     grad = _select_available(df, GRADIENT_FEATURES)

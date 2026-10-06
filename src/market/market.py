@@ -55,10 +55,13 @@ class EnergyMarket:
         self.data = load_data(self.start, self.end, freq=self.freq)
         print(f"[EnergyMarket.initialize] Données chargées : {len(self.data)} lignes")
 
-    def learn(self, model_type):
+    def learn(self, model_type, use_neighbour_prices: bool = False):
         print(f"[EnergyMarket.learn] Apprentissage modèle {model_type} (météo {self.meteo_mode})")
         self.model_type = model_type
-        self.model = model_learn(self.data, model_type, meteo_mode=self.meteo_mode)
+        self.model = model_learn(
+            self.data, model_type, meteo_mode=self.meteo_mode,
+            use_neighbour_prices=use_neighbour_prices,
+        )
         print("[EnergyMarket.learn] Modèle prêt")
         # Récap visuel : dernier jour (pas natif), dernier mois (moy. journalière),
         # dernière année (moy. journalière). Chaque titre porte le nom du modèle.

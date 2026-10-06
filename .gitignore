@@ -2,9 +2,18 @@
 .venv/
 envEnergyPricing/
 
+# Secrets (clé ENTSO-E) — cf. .env.example
+.env
+
 # Données (volumineuses, non versionnées) sauf les référentiels géographiques
 data/*
 !data/Geographie/
+
+# Artefacts d'entraînement (modèles sérialisés, logs Lightning)
+*.pkl
+results/models/
+experiments/_runs/
+lightning_logs/
 
 # Python
 __pycache__/
@@ -14,4 +23,3 @@ __pycache__/
 # macOS / IDE
 .DS_Store
 .vscode/
-

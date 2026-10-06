@@ -15,7 +15,6 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import (
     f1_score,
     mean_absolute_error,
@@ -149,7 +148,11 @@ def model_learn(
     n_splits: int = 5,
     meteo_mode: str = "department",
     fast: bool = True,
+    use_neighbour_prices: bool = False,
 ):
+    # use_neighbour_prices : inclut les prix DA des pays voisins. Désactivé par défaut,
+    # car ils sont fixés en même temps que le prix FR (couplage EUPHEMIA) : utile pour
+    # reconstruire un prix a posteriori, mais inconnu au moment de la prévision J-1.
     # Cache : si un modèle a déjà été entraîné sur la même plage / type / fréquence
     # / mode météo, on le recharge.
     # fast : ne concerne que le TFT (cf. learn_tft) — mode rapide pour les longs
@@ -167,8 +170,9 @@ def model_learn(
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     fast_tag = "_fast" if tft_fast else ""
+    nb_tag = "_nb" if use_neighbour_prices else ""
     cache_path = MODEL_DIR / (
-        f"pricing_from_meteo_{model_type}_{start}_{end}_{freq_tag}_{meteo_tag}{fast_tag}.pkl"
+        f"pricing_from_meteo_{model_type}_{start}_{end}_{freq_tag}_{meteo_tag}{fast_tag}{nb_tag}.pkl"
     )
 
     if cache_path.exists():
@@ -194,7 +198,9 @@ def model_learn(
     # éviter d'introduire un signal très bruité par l'imputation.
     meteo_cols = _meteo_cols_of(df)
     fc_features = _select_available(df, ENTSOE_FORECAST_FEATURES)
-    nb_features = _select_available(df, NEIGHBOUR_PRICE_FEATURES)
+    nb_features = (
+        _select_available(df, NEIGHBOUR_PRICE_FEATURES) if use_neighbour_prices else []
+    )
     gas_features = _select_available(df, GAS_FEATURES)
     cap_features = _select_available(df, CAPACITY_FEATURES)
     grad_features = _select_available(df, GRADIENT_FEATURES)
@@ -231,15 +237,33 @@ def model_learn(
     tscv = TimeSeriesSplit(n_splits=n_splits)
     cv_scores = {"train": [], "test": []}
     spike_cv = []
+    fold_details = []
     last_split_times = None
+    last_fold_pred = None
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X), start=1):
         X_tr, X_te = X[train_idx], X[test_idx]
         y_tr, y_te = y[train_idx], y[test_idx]
         model = _build_model(model_type)
-        model = _fit_with_validation(model, model_type, X_tr, y_tr, X_te, y_te)
+        # Early stopping sur la fin du train (10 %), jamais sur le pli de test :
+        # sinon le nombre d'arbres serait choisi en regardant le test.
+        n_es = max(24, int(len(train_idx) * 0.1))
+        model = _fit_with_validation(
+            model, model_type, X_tr[:-n_es], y_tr[:-n_es], X_tr[-n_es:], y_tr[-n_es:]
+        )
         fold_scores = _compute_fold_scores(model, X_tr, y_tr, X_te, y_te)
         cv_scores["train"].append(fold_scores["train"])
         cv_scores["test"].append(fold_scores["test"])
+        fold_details.append({
+            **fold_scores["test"],
+            "test_start": df["time"].iloc[test_idx[0]].isoformat(),
+            "test_end": df["time"].iloc[test_idx[-1]].isoformat(),
+        })
+        if fold == n_splits:
+            last_fold_pred = pd.DataFrame({
+                "time": df["time"].iloc[test_idx].values,
+                "y_true": y_te,
+                "y_pred": model.predict(X_te),
+            })
 
         # Classifieur de pic évalué sur le même découpage temporel.
         s_tr, s_te = is_spike[train_idx], is_spike[test_idx]
@@ -264,6 +288,7 @@ def model_learn(
         )
 
     scores = _aggregate_cv_scores(cv_scores)
+    scores["folds"] = fold_details
     if spike_cv:
         scores["spike"] = _aggregate_spike_scores(spike_cv)
     if last_split_times is not None:
@@ -302,6 +327,7 @@ def model_learn(
         "n_splits": int(n_splits),
         "scores": scores,
         "spike_model": spike_model,
+        "last_fold_pred": last_fold_pred,
         "spike_thresholds": {
             "low": q_lo, "high": q_hi,
             "low_q": SPIKE_LOW_Q, "high_q": SPIKE_HIGH_Q,
@@ -411,7 +437,10 @@ def _print_scores(bundle: dict) -> None:
     print("=" * 72)
     print(f"[model_score] Modèle '{bundle.get('model_type')}' — caractéristiques :")
     print(f"  - Plage entraînement   : {bundle.get('start')} -> {bundle.get('end')}")
-    print(f"  - Features ({len(bundle.get('feature_cols') or [])}) : {bundle.get('feature_cols')}")
+    feats = bundle.get("feature_cols") or []
+    n_meteo = sum("__" in c for c in feats)
+    others = [c for c in feats if "__" not in c]
+    print(f"  - Features ({len(feats)}) : {n_meteo} météo par département + {others}")
     if "time_test_start" in s:
         print(f"  - Dernier pli test     : {s.get('time_test_start')} -> {s.get('time_test_end')}")
     print(f"  - Heures totales       : {bundle.get('n_total')}")
@@ -735,8 +764,10 @@ def _build_model(model_type: str):
     if model_type == "Simple":
         return Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
     if model_type == "RandomForest":
+        from sklearn.ensemble import RandomForestRegressor
         return RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
     if model_type == "GradientBoosting":
+        from sklearn.ensemble import GradientBoostingRegressor
         return GradientBoostingRegressor(n_estimators=200, random_state=42)
     if model_type == "LightGBM":
         # Tuning prudent : régularisation modérée, learning rate fixe, early stopping

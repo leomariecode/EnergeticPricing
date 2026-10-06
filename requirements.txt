@@ -1,34 +1,28 @@
-# Dépendances directes du projet. Les transitives sont résolues par pip.
-# Versions exactes reproductibles : voir requirements.lock.txt
+# Dépendances directes du projet (Python 3.12). Les transitives sont résolues par pip.
 
 # --- Données / calcul ---
 numpy
 pandas
-pyarrow         # moteur parquet pour le cache de src/data/loader.py
-scipy
+pyarrow         # moteur parquet pour les caches de src/data/loader.py
 scikit-learn
-
-# --- Données géo ---
-geopandas
-mapclassify
-shapely
-pyproj
-
-# --- Sources de données externes ---
-cdsapi          # ERA5 / Copernicus Climate Data Store
-xarray          # lecture des NetCDF ERA5
-entsoe-py       # prix & charge marché électrique
 holidays
 
+# --- Sources de données externes ---
+requests        # Open-Meteo (archive ERA5 + forecast)
+entsoe-py       # prix day-ahead, prévisions de charge / éolien / solaire
+yfinance        # prix du gaz TTF
+python-dotenv   # lecture de la clé ENTSO-E depuis .env
+shapely         # géométrie des départements (fallback des coordonnées)
+
 # --- Modèles ---
-torch
-lightning
-pytorch-forecasting
 lightgbm
 joblib
 
-# --- Visualisation ---
-matplotlib
+# --- Optionnel : modèle TFT (src/models/tft.py) ---
+# torch
+# lightning
+# pytorch-forecasting
 
-# --- Notebooks ---
+# --- Visualisation / notebooks ---
+matplotlib
 ipykernel

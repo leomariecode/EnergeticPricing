@@ -1,7 +1,9 @@
+import os
 from pathlib import Path
 import time
 import pandas as pd
-import geopandas as gpd
+import json
+from shapely.geometry import shape
 import requests
 from entsoe import EntsoePandasClient
 
@@ -78,9 +80,13 @@ def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
     pref_path = DATA_DIR / "Geographie" / "prefectures_france.csv"
 
     print(f"[load_data] Lecture du geojson : {geo_path}")
-    departements = gpd.read_file(geo_path)
     DEP_CODE = [str(i).zfill(2) for i in range(1, 96) if i != 20] + ["2A", "2B"]
-    departements = departements[departements["code"].isin(DEP_CODE)]
+    with open(geo_path, encoding="utf-8") as f:
+        features = json.load(f)["features"]
+    departements = pd.DataFrame([
+        {"code": ft["properties"]["code"], "geometry": shape(ft["geometry"])}
+        for ft in features if ft["properties"]["code"] in DEP_CODE
+    ])
     # Fichier INSEE : DEP = code département ("01".."95", "2A"/"2B"),
     # PMUN = population municipale (référence légale), PTOT = population totale.
     pop_dep = pd.read_csv(pop_path, sep=";", dtype={"DEP": str})
@@ -116,7 +122,8 @@ def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
         coords = pref_coords.get(code)
         lat = coords["latitude"] if coords else None
         lon = coords["longitude"] if coords else None
-        df_dep = load_meteo_france(start, end, departement, code=code, lat=lat, lon=lon)
+        geometry = departement["geometry"].iloc[0]
+        df_dep = load_meteo_france(start, end, geometry, code=code, lat=lat, lon=lon)
         df_dep["code"] = code
         # Population du département : sert de poids pour l'agrégation nationale de la météo
         # (un département à 2M habitants pèse beaucoup plus dans la conso nationale qu'un à 80k).
@@ -273,7 +280,14 @@ def _resample_to_freq(s, freq: str):
 
 ARCHIVE_LAG_DAYS = 6  # marge de sécurité sur le délai ~5j d'Open-Meteo archive
 
-ENTSOE_TOKEN = "REDACTED_ENTSOE_KEY"
+# Clé API ENTSO-E (Transparency Platform) : lue dans l'environnement, ou dans un
+# fichier .env à la racine (non versionné, cf. .env.example).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+ENTSOE_TOKEN = os.environ.get("ENTSOE_API_KEY")
 
 # Zones de marché frontalières de la France (libellés ENTSO-E -> suffixe de colonne).
 # Toutes sont couplées au day-ahead français : leur prix porte l'info de tension
@@ -333,7 +347,26 @@ def load_entsoe_neighbour_prices(start: str, end: str, freq: str = "1h") -> pd.D
 GAS_TICKER = "TTF=F"
 
 
+# Décalage de publication du gaz : le day-ahead électricité de J se clôt à midi
+# en J-1, avant la clôture TTF de J-1. La dernière clôture connue est donc celle
+# de J-2 -> on décale de 2 jours pour ne pas injecter d'info future.
+GAS_PUBLICATION_LAG_DAYS = 2
+
+
 def load_gas_price(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
+    # Prix du gaz TTF au pas freq, décalé de GAS_PUBLICATION_LAG_DAYS (cf. ci-dessus).
+    fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=GAS_PUBLICATION_LAG_DAYS)).strftime("%Y-%m-%d")
+    gas = _load_gas_price_raw(fetch_start, end, freq=freq)
+    if gas.empty:
+        return gas
+    gas = gas.copy()
+    gas["time"] = pd.to_datetime(gas["time"]) + pd.Timedelta(days=GAS_PUBLICATION_LAG_DAYS)
+    end_excl = pd.Timestamp(end) + pd.Timedelta(days=1)
+    mask = (gas["time"] >= pd.Timestamp(start)) & (gas["time"] < end_excl)
+    return gas.loc[mask].reset_index(drop=True)
+
+
+def _load_gas_price_raw(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
     # Prix du gaz TTF récupéré via Yahoo Finance. Yahoo ne sert que du journalier
     # (jours ouvrés) : on densifie au pas freq par ffill — la clôture d'un jour
     # s'applique aux pas du lendemain et la clôture du vendredi couvre le week-end.
@@ -402,15 +435,22 @@ def load_installed_capacity() -> pd.DataFrame:
         print(f"[load_installed_capacity] registre absent ({REGISTRY_PATH}); capacités ignorées.")
         return pd.DataFrame(columns=["code", "date", "solar_capacity", "wind_capacity"])
 
-    cols = ["codeDepartement", "filiere", "puisMaxInstallee", "dateMiseEnservice (format date)"]
+    # Deux formats d'export coexistent (data.gouv en camelCase, ODRE en minuscules) :
+    # on repère les colonnes utiles par leur nom normalisé.
+    aliases = {
+        "codedepartement": "code",
+        "filiere": "filiere",
+        "puismaxinstallee": "puisMaxInstallee",
+        "datemiseenservice (format date)": "date",
+        "datemiseenservice_date": "date",
+    }
+    header = pd.read_csv(REGISTRY_PATH, sep=";", encoding="utf-8-sig", nrows=0).columns
+    rename = {c: aliases[c.lower()] for c in header if c.lower() in aliases}
     reg = pd.read_csv(
-        REGISTRY_PATH, sep=";", encoding="utf-8-sig", usecols=cols,
-        dtype={"codeDepartement": str}, low_memory=False,
+        REGISTRY_PATH, sep=";", encoding="utf-8-sig", usecols=list(rename),
+        dtype=str, low_memory=False,
     )
-    reg = reg.rename(columns={
-        "codeDepartement": "code",
-        "dateMiseEnservice (format date)": "date",
-    })
+    reg = reg.rename(columns=rename)
     reg = reg[reg["filiere"].isin(CAPACITY_FILIERES)].copy()
     reg["date"] = pd.to_datetime(reg["date"], errors="coerce")
     reg["puisMaxInstallee"] = pd.to_numeric(reg["puisMaxInstallee"], errors="coerce")
@@ -529,11 +569,11 @@ def load_entsoe_forecasts(start: str, end: str, freq: str = "1h") -> pd.DataFram
 def load_meteo_france(
     start: str,
     end: str,
-    departement: gpd.GeoDataFrame,
+    geometry,
     code: str | None = None,
     lat: float | None = None,
     lon: float | None = None,
-    max_retries: int = 5,
+    max_retries: int = 12,
 ) -> pd.DataFrame:
     # start / end au format ISO "YYYY-MM-DD" (inclus)
     # Bascule automatiquement entre l'API archive (ERA5, retard ~5 jours) et l'API forecast
@@ -542,7 +582,7 @@ def load_meteo_france(
     if lat is not None and lon is not None:
         latitude, longitude = float(lat), float(lon)
     else:
-        point = departement.geometry.representative_point().iloc[0]
+        point = geometry.representative_point()
         latitude, longitude = point.y, point.x
 
     start_d = pd.to_datetime(start).date()
