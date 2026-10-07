@@ -23,6 +23,7 @@ Key takeaways:
 - **Capacity-weighted renewable potential** is the most valuable feature block. It is built from the national installation registry × local weather in each of the 96 départements.
 - **Neighbour day-ahead prices are look-ahead leakage.** They clear simultaneously with France (EUPHEMIA coupling). Including them inflates R² from 0.50 to 0.79, so they are excluded from the forecasting models.
 - **What did not help:** 2-day-lagged gas, an L1 loss, and **nuclear availability**. Nuclear output of D-2, planned outages (REMIT), their day-on-day change and the residual load left to thermal plants all scored 16.6 vs 16.5 for the main model on mature folds. The fleet changes over weeks, so its state is already reflected in yesterday's price.
+- **Negative prices remain the blind spot.** Their frequency rose from 1.5% to about 10% of hours between 2023 and 2025-2026, mostly on sunny weekends and bridge days. The model over-forecasts them by about +12 EUR/MWh. A two-regime **hurdle model** (classifier P(price ≤ 0) + one regressor per regime, `MODEL = "LightGBM_hurdle"`) with targeted features improves the overall MAE only marginally (16.3 vs 16.5) and leaves the bias in place: the classifier is rarely confident enough to switch regime.
 
 ## Data
 

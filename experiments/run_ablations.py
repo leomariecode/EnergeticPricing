@@ -78,6 +78,14 @@ CONFIGS = [
     # + variations J vs J-1 et demande résiduelle thermique (cf. NUCLEAR_DERIVED_FEATURES).
     dict(name="forecast_full_nuke_delta", neighbours=False, gas=True, capacity=True,
          nuclear_gen=True, nuclear_planned=True, nuclear_derived=True, models=["LightGBM"]),
+    # Prix négatifs : features ciblées, modèle à deux étages, puis les deux
+    # (cf. NEG_FEATURES et HurdleLGBM dans pricing_from_meteo).
+    dict(name="forecast_full_negfeat", neighbours=False, gas=True, capacity=True,
+         neg_features=True, models=["LightGBM"]),
+    dict(name="forecast_full_hurdle", neighbours=False, gas=True, capacity=True,
+         models=["LightGBM_hurdle"]),
+    dict(name="forecast_full_hurdle_negfeat", neighbours=False, gas=True, capacity=True,
+         neg_features=True, models=["LightGBM_hurdle"]),
 ]
 
 
@@ -121,6 +129,7 @@ def _naive_benchmarks(data: pd.DataFrame) -> list[dict]:
             folds.append(dict(
                 r2=r2_score(y, p), mae=mean_absolute_error(y, p),
                 rmse=float(np.sqrt(mean_squared_error(y, p))),
+                **pm._negative_regime_scores(y, p),
                 test_start=te["time"].iloc[0].isoformat(),
                 test_end=te["time"].iloc[-1].isoformat(),
             ))
@@ -143,10 +152,18 @@ def _amplitude_ratio(last_fold: pd.DataFrame | None):
 
 
 def _save_importance(bundle: dict, tag: str) -> None:
-    if bundle.get("model_type") != "LightGBM":
-        return
-    gain = bundle["model"].booster_.feature_importance("gain")
-    imp = pd.DataFrame({"feature": bundle["feature_cols"], "gain": gain})
+    model = bundle["model"]
+    if bundle.get("model_type") == "LightGBM_hurdle":
+        # Ce qui fait basculer en régime négatif (classifieur), en plus du régresseur.
+        _write_importance(model.clf_.booster_, bundle["feature_cols"], f"{tag}_negclf")
+        _write_importance(model.pos_.booster_, bundle["feature_cols"], tag)
+    elif bundle.get("model_type") == "LightGBM":
+        _write_importance(model.booster_, bundle["feature_cols"], tag)
+
+
+def _write_importance(booster, feature_cols, tag: str) -> None:
+    gain = booster.feature_importance("gain")
+    imp = pd.DataFrame({"feature": feature_cols, "gain": gain})
     # Les ~500 colonnes météo départementales sont regroupées par variable.
     imp["group"] = imp["feature"].map(lambda c: c.split("__")[0] + " (by dept)" if "__" in c else c)
     imp = imp.groupby("group", as_index=False)["gain"].sum()
@@ -163,7 +180,7 @@ def run():
 
     print(f"[ablation] Chargement des données {START} -> {END} (freq={FREQ})")
     t_load = time.time()
-    data = load_data(START, END, freq=FREQ, nuclear=True)
+    data = load_data(START, END, freq=FREQ, nuclear=True, neighbours=True)
     print(f"[ablation] {len(data)} lignes chargées en {time.time() - t_load:.0f}s\n")
 
     rows, fold_rows = [], []
@@ -173,10 +190,8 @@ def run():
         rows.append(b)
         print(f"[ablation] {b['model']} -> test MAE={b['test_mae']} R²={b['test_r2']}")
 
-    jobs = [
-        (mt, cfg) for mt in MODEL_TYPES for cfg in CONFIGS
-        if mt in cfg.get("models", MODEL_TYPES)
-    ]
+    jobs = [(mt, cfg) for cfg in CONFIGS for mt in cfg.get("models", MODEL_TYPES)]
+    jobs.sort(key=lambda j: MODEL_TYPES.index(j[0]) if j[0] in MODEL_TYPES else len(MODEL_TYPES))
     for i, (model_type, cfg) in enumerate(jobs, start=1):
         tag = f"{model_type}_{cfg['name']}"
         print("#" * 72 + f"\n[ablation] ({i}/{len(jobs)}) {tag}\n" + "#" * 72)
@@ -185,6 +200,7 @@ def run():
             pm.MODEL_DIR = RUNS_DIR / tag
             pm._build_model = _with_objective(cfg.get("objective"))
             pm.USE_NUCLEAR_DERIVED = cfg.get("nuclear_derived", False)
+            pm.USE_NEG_FEATURES = cfg.get("neg_features", False)
             bundle = model_learn(
                 _apply_config(data, cfg), model_type, n_splits=N_SPLITS,
                 meteo_mode=cfg.get("meteo_mode", METEO_MODE),
@@ -220,6 +236,7 @@ def run():
             pm.MODEL_DIR = Path("results/models")
             pm._build_model = _ORIG_BUILD_MODEL
             pm.USE_NUCLEAR_DERIVED = True
+            pm.USE_NEG_FEATURES = True
 
         rows.append(row)
         # Réécriture incrémentale : rien n'est perdu si interruption.

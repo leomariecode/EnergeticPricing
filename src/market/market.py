@@ -23,7 +23,10 @@ MAX_FORWARD_DAYS = 3
 
 class EnergyMarket:
 
-    def __init__(self, start, end, freq: str = "1h", meteo_mode: str = "department"):
+    def __init__(
+        self, start, end, freq: str = "1h", meteo_mode: str = "department",
+        nuclear: bool = False, neighbours: bool = False,
+    ):
         # freq : "1h" (par défaut) ou "15min". Détermine le pas de temps cible utilisé
         # pour tout le pipeline (prix, prévisions ENTSO-E, météo, features, modèle).
         # En "15min", les prix DA récents (post-oct 2025) restent au pas natif 15 min ;
@@ -33,6 +36,11 @@ class EnergyMarket:
         # meteo_mode : "department" (défaut) garde la météo par département (95x5 colonnes,
         # le modèle voit la structure spatiale) ; "national" l'agrège en une moyenne
         # pondérée population (baseline plus compacte).
+        #
+        # nuclear : charge les features nucléaires (production J-2, arrêts planifiés
+        # REMIT). Premier téléchargement lent (~20 min), sans gain mesuré sur 2024-2026.
+        # neighbours : charge les prix DA voisins. Non connus avant l'enchère -> à
+        # réserver à l'analyse a posteriori (learn(use_neighbour_prices=True)).
         if freq not in _SUPPORTED_FREQS:
             raise ValueError(f"freq doit être dans {_SUPPORTED_FREQS}, reçu '{freq}'")
         if meteo_mode not in _SUPPORTED_METEO_MODES:
@@ -46,16 +54,25 @@ class EnergyMarket:
         self.end = end
         self.freq = freq
         self.meteo_mode = meteo_mode
+        self.nuclear = nuclear
+        self.neighbours = neighbours
 
     def initialize(self):
         print(
             f"[EnergyMarket.initialize] start={self.start}, end={self.end}, "
             f"freq={self.freq}, meteo_mode={self.meteo_mode}"
         )
-        self.data = load_data(self.start, self.end, freq=self.freq)
+        self.data = self._load(self.start, self.end)
         print(f"[EnergyMarket.initialize] Données chargées : {len(self.data)} lignes")
 
+    def _load(self, start, end):
+        return load_data(
+            start, end, freq=self.freq, nuclear=self.nuclear, neighbours=self.neighbours,
+        )
+
     def learn(self, model_type, use_neighbour_prices: bool = False):
+        if use_neighbour_prices and not self.neighbours:
+            raise ValueError("use_neighbour_prices=True requiert EnergyMarket(neighbours=True).")
         print(f"[EnergyMarket.learn] Apprentissage modèle {model_type} (météo {self.meteo_mode})")
         self.model_type = model_type
         self.model = model_learn(
@@ -79,7 +96,7 @@ class EnergyMarket:
             f"[EnergyMarket] Extension du dataset : {extra_start} -> {extra_end} "
             f"(au-delà du END configuré, fetch Open-Meteo + ENTSO-E)"
         )
-        extra = load_data(extra_start, extra_end, freq=self.freq)
+        extra = self._load(extra_start, extra_end)
         if extra.empty:
             print("[EnergyMarket] Aucune nouvelle donnée récupérée pour l'extension.")
             return

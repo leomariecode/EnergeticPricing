@@ -66,7 +66,12 @@ def _find_covering_cache(cache_dir: Path, prefix: str, start: str, end: str) -> 
     return df.loc[(df["time"] >= s_ts) & (df["time"] <= e_ts)].reset_index(drop=True)
 
 
-def load_data(start: str, end: str, freq: str = "1h", nuclear: bool = False) -> pd.DataFrame:
+def load_data(
+    start: str, end: str, freq: str = "1h",
+    nuclear: bool = False, neighbours: bool = False,
+) -> pd.DataFrame:
+    # nuclear / neighbours : blocs optionnels, désactivés par défaut car lents à
+    # télécharger et absents du modèle principal (cf. experiments/run_ablations.py).
     # start / end au format ISO "YYYY-MM-DD" ; freq = "1h" ou "15min".
     # Pour "15min" : prix et forecasts ENTSO-E gardés en 15-min natifs (post-oct 2025)
     # ou upsamplés par ffill (avant). La météo (toujours fetchée en horaire) est
@@ -150,8 +155,11 @@ def load_data(start: str, end: str, freq: str = "1h", nuclear: bool = False) -> 
     print("[load_data] Chargement des prévisions ENTSO-E (load + wind/solar)")
     df_fc = load_entsoe_forecasts(start, end, freq=freq)
 
-    print("[load_data] Chargement des prix des pays voisins")
-    df_nb = load_entsoe_neighbour_prices(start, end, freq=freq)
+    if neighbours:
+        print("[load_data] Chargement des prix des pays voisins")
+        df_nb = load_entsoe_neighbour_prices(start, end, freq=freq)
+    else:
+        df_nb = pd.DataFrame({"time": pd.Series(dtype="datetime64[ns]")})
 
     print("[load_data] Chargement du prix du gaz (TTF)")
     df_gas = load_gas_price(start, end, freq=freq)
@@ -725,6 +733,29 @@ def load_entsoe_forecasts(start: str, end: str, freq: str = "1h") -> pd.DataFram
     return out
 
 
+def _meteo_prefix_cache(code: str, start_d):
+    # Plus long cache 'dep_{code}_S_E' avec S <= start. On ne lui fait confiance que
+    # jusqu'à la limite de l'archive ERA5 au moment où il a été écrit : au-delà, ses
+    # valeurs venaient de l'API forecast et doivent être re-téléchargées.
+    # Renvoie (slice [start, fin de confiance], fin de confiance) ou (None, None).
+    best = None
+    for s_ts, e_ts, path in _scan_cache_files(METEO_CACHE_DIR, f"dep_{code}"):
+        if s_ts.date() > start_d:
+            continue
+        written = pd.Timestamp(path.stat().st_mtime, unit="s").normalize().date()
+        trusted_end = min(e_ts.date(), written - pd.Timedelta(days=ARCHIVE_LAG_DAYS + 1))
+        if trusted_end >= start_d and (best is None or trusted_end > best[0]):
+            best = (trusted_end, path)
+    if best is None:
+        return None, None
+    trusted_end, path = best
+    df = pd.read_parquet(path)
+    df["time"] = pd.to_datetime(df["time"])
+    lo = pd.Timestamp(start_d)
+    hi = pd.Timestamp(trusted_end) + pd.Timedelta(days=1)
+    return df.loc[(df["time"] >= lo) & (df["time"] < hi)].reset_index(drop=True), trusted_end
+
+
 def load_meteo_france(
     start: str,
     end: str,
@@ -749,62 +780,37 @@ def load_meteo_france(
     today = pd.Timestamp.today().normalize().date()
     archive_cutoff = today - pd.Timedelta(days=ARCHIVE_LAG_DAYS)
 
-    # 1) On cherche d'abord un cache dont la plage couvre [start, end] : si un
-    #    fichier 'dep_{code}_S_E.parquet' avec S<=start et E>=end existe, on en
-    #    sert un slice (cas typique : l'utilisateur ressort une sous-plage d'un
-    #    cache déjà téléchargé sur une plage plus large).
+    # 1) Un cache couvre déjà [start, end] -> on en sert un slice.
+    # 2) Sinon, on réutilise le plus long cache qui démarre avant start (même s'il
+    #    s'arrête avant end) et on ne télécharge que la suite. Changer END ne
+    #    relance donc plus le téléchargement complet de l'historique.
     cache_path = None
-    cached_archive: pd.DataFrame | None = None
+    prefix, fetch_from = None, start_d
     if code is not None:
         METEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         covering = _find_covering_cache(METEO_CACHE_DIR, f"dep_{code}", start, end)
         if covering is not None and not covering.empty:
             return covering
-
-        # 2) Sinon : si un cache pour la plage exacte existe mais est partiel (max < end),
-        #    on en récupère la portion archive et on re-télécharge la partie forecast.
         cache_path = METEO_CACHE_DIR / f"dep_{code}_{start}_{end}.parquet"
-        if cache_path.exists():
-            cached_full = pd.read_parquet(cache_path)
-            cached_max = pd.to_datetime(cached_full["time"]).max().date()
-            print(
-                f"[load_meteo_france] cache partiel ({cached_max}<{end_d}) -> "
-                f"refetch forecast"
-            )
-            cutoff_ts = pd.Timestamp(archive_cutoff) + pd.Timedelta(hours=23, minutes=59)
-            cached_archive = cached_full[pd.to_datetime(cached_full["time"]) <= cutoff_ts]
-        elif end_d > archive_cutoff:
-            # 3) Pas de cache exact, mais peut-être un cache plus large qui couvre
-            #    au moins la portion archive [start, archive_cutoff]. Si oui, on
-            #    n'a plus qu'à re-télécharger la portion forecast récente.
-            archive_covering = _find_covering_cache(
-                METEO_CACHE_DIR, f"dep_{code}",
-                start, archive_cutoff.isoformat(),
-            )
-            if archive_covering is not None and not archive_covering.empty:
-                cached_archive = archive_covering
-                print(
-                    f"[load_meteo_france] cache archive partiel hit "
-                    f"(archive {start}..{archive_cutoff} servi depuis le cache) "
-                    f"-> refetch forecast uniquement"
-                )
+        prefix, trusted_end = _meteo_prefix_cache(code, start_d)
+        if prefix is not None:
+            fetch_from = trusted_end + pd.Timedelta(days=1)
+            print(f"[load_meteo_france] dep {code} : cache réutilisé jusqu'au {trusted_end}, "
+                  f"téléchargement {fetch_from} -> {end_d}")
 
-    chunks: list[pd.DataFrame] = []
-    if start_d <= archive_cutoff:
-        if cached_archive is not None and not cached_archive.empty:
-            chunks.append(cached_archive)
-        else:
-            archive_end = min(end_d, archive_cutoff)
-            chunks.append(
-                _fetch_meteo(
-                    "https://archive-api.open-meteo.com/v1/archive",
-                    latitude, longitude,
-                    start_d.isoformat(), archive_end.isoformat(),
-                    max_retries,
-                )
+    chunks: list[pd.DataFrame] = [prefix] if prefix is not None else []
+    archive_end = min(end_d, archive_cutoff)
+    if fetch_from <= archive_end:
+        chunks.append(
+            _fetch_meteo(
+                "https://archive-api.open-meteo.com/v1/archive",
+                latitude, longitude,
+                fetch_from.isoformat(), archive_end.isoformat(),
+                max_retries,
             )
+        )
     if end_d > archive_cutoff:
-        forecast_start = max(start_d, archive_cutoff + pd.Timedelta(days=1))
+        forecast_start = max(fetch_from, archive_cutoff + pd.Timedelta(days=1))
         chunks.append(
             _fetch_meteo(
                 "https://api.open-meteo.com/v1/forecast",
@@ -846,7 +852,15 @@ def _fetch_meteo(
     }
 
     for attempt in range(1, max_retries + 1):
-        r = requests.get(url, params=params)
+        try:
+            r = requests.get(url, params=params, timeout=120)
+        except requests.RequestException as exc:
+            # Coupure réseau / connexion fermée par le serveur : on réessaie.
+            wait = min(15 * attempt, 120)
+            print(f"[_fetch_meteo] erreur réseau ({type(exc).__name__}) tentative "
+                  f"{attempt}/{max_retries}, attente {wait}s...")
+            time.sleep(wait)
+            continue
 
         if r.status_code == 429:
             retry_after = r.headers.get("Retry-After")

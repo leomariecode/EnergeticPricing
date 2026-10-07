@@ -53,6 +53,9 @@ LABELS = {
     ("LightGBM", "reconstruction"): "LightGBM · + neighbour prices*",
     ("LightGBM", "forecast_full_nuke_gen"): "LightGBM · full + nuclear output D-2",
     ("LightGBM", "forecast_full_nuke_delta"): "LightGBM · full + all nuclear features",
+    ("LightGBM", "forecast_full_negfeat"): "LightGBM · full + negative-price features",
+    ("LightGBM_hurdle", "forecast_full_hurdle"): "Two-regime LightGBM (hurdle)",
+    ("LightGBM_hurdle", "forecast_full_hurdle_negfeat"): "Hurdle + negative-price features",
 }
 # Lignes de la figure 1 (les Ridge divergents restent dans le tableau).
 FIG1_ROWS = [
@@ -91,7 +94,7 @@ def fig_mae(summary: pd.DataFrame, path: Path):
     d = summary.set_index(["model", "config"]).loc[FIG1_ROWS].reset_index()
     y = np.arange(len(d))
     h = 0.38
-    fig, ax = plt.subplots(figsize=(7.2, 3.4))
+    fig, ax = plt.subplots(figsize=(7.2, 3.15))
     ax.barh(y + h / 2, d["mae_all"], height=h - 0.04, color="#a9c8ef", label="All 5 folds")
     ax.barh(y - h / 2, d["mae_mature"], height=h - 0.04, color=BLUE,
             label=f"Folds with ≥ {MATURE_MONTHS} months of training data")
@@ -120,7 +123,7 @@ def fig_week(tag: str, path: Path, days: int = 14):
     # Fenêtre de 2 semaines la plus volatile du dernier pli.
     end = lf["y_true"].rolling(f"{days}D").std().idxmax()
     w = lf.loc[end - pd.Timedelta(days=days):end]
-    fig, ax = plt.subplots(figsize=(7.2, 1.95))
+    fig, ax = plt.subplots(figsize=(7.2, 1.75))
     ax.plot(w.index, w["y_true"], color=INK, linewidth=1.2, label="Actual day-ahead price")
     ax.plot(w.index, w["y_pred"], color=BLUE, linewidth=1.2,
             label="LightGBM forecast (ex-ante information only)")
@@ -136,9 +139,9 @@ def fig_week(tag: str, path: Path, days: int = 14):
     return w.index.min(), w.index.max()
 
 
-def fig_importance(tag: str, path: Path, top: int = 10):
+def fig_importance(tag: str, path: Path, top: int = 8):
     imp = pd.read_csv(RES / f"importance_{tag}.csv").head(top).iloc[::-1]
-    fig, ax = plt.subplots(figsize=(7.2, 1.95))
+    fig, ax = plt.subplots(figsize=(7.2, 1.6))
     ax.barh(imp["group"], 100 * imp["share"], color=BLUE, height=0.6)
     for yi, v in enumerate(100 * imp["share"]):
         ax.text(v + 0.5, yi, f"{v:.1f}%", va="center", fontsize=7.5, color=INK)
@@ -156,7 +159,7 @@ def fig_folds(folds: pd.DataFrame, path: Path):
         (("Simple", "forecast_nocap"), ORANGE, "Ridge (best linear)"),
         (("LightGBM", "forecast_full"), BLUE, "LightGBM (main model)"),
     ]
-    fig, ax = plt.subplots(figsize=(7.2, 2.05))
+    fig, ax = plt.subplots(figsize=(7.2, 1.85))
     width = 0.26
     labels = None
     for k, ((m, c), col, lab) in enumerate(series):
@@ -218,6 +221,18 @@ def build():
     ridge = row("Simple", "forecast_nocap")
     nuke_gen = row("LightGBM", "forecast_full_nuke_gen")
     nuke = row("LightGBM", "forecast_full_nuke_delta")
+    hurdle = row("LightGBM_hurdle", "forecast_full_hurdle_negfeat")
+
+    def neg_stats(m, c):
+        # Erreur et biais sur les heures à prix <= 0 des plis matures, pondérés
+        # par le nombre de ces heures dans chaque pli.
+        g = folds[(folds["model"] == m) & (folds["config"] == c) & folds["mature"]]
+        w = g["n_neg"]
+        return (g["mae_neg"] * w).sum() / w.sum(), (g["bias_neg"] * w).sum() / w.sum()
+
+    neg_naive = neg_stats("naive_D-1", "benchmark")
+    neg_best = neg_stats("LightGBM", "forecast_full")
+    neg_hurdle = neg_stats("LightGBM_hurdle", "forecast_full_hurdle_negfeat")
     imp_nuke = pd.read_csv(RES / "importance_LightGBM_forecast_full_nuke_delta.csv").set_index("group")["share"]
     skill_mature = 1 - best["mae_mature"] / naive1["mae_mature"]
     skill_all = 1 - best["mae_all"] / naive1["mae_all"]
@@ -371,6 +386,7 @@ def build():
              ("LightGBM", "forecast_base"), ("LightGBM", "forecast_nocap"),
              ("LightGBM", "forecast_full_national"), ("LightGBM", "forecast_full_l1"),
              ("LightGBM", "forecast_full_nuke_gen"), ("LightGBM", "forecast_full_nuke_delta"),
+             ("LightGBM_hurdle", "forecast_full_hurdle_negfeat"),
              ("LightGBM", "forecast_full"), ("LightGBM", "reconstruction")]
     tab = [["Model · features", "MAE, all folds", f"MAE, ≥ {MATURE_MONTHS} mo", "R², all folds",
             f"R², ≥ {MATURE_MONTHS} mo"]]
@@ -411,9 +427,15 @@ def build():
         "and a single coupled neighbour (Belgium) takes most of the model's importance. Results that include "
         "such features overstate what can be achieved before the auction. This project's own first version "
         "made that mistake.",
-        f"<b>Extremes remain hard.</b> Forecasts are smoothed (prediction std / actual std = "
-        f"{best['ampl_ratio']:.2f}), and the spike classifier catches only {100 * best['spike_recall']:.0f}% "
-        f"of hours outside the 5–95% band, with {100 * best['spike_precision']:.0f}% precision.",
+        f"<b>Negative prices remain the main blind spot.</b> Hours at or below 0 (mostly 10:00–16:00, "
+        f"weekends, April–June; 1.5% of hours in H1 2023, 11% in H1 2025) are over-forecast by "
+        f"+{neg_best[1]:.0f} EUR/MWh on average, worse than persistence on those hours (MAE "
+        f"{neg_best[0]:.1f} vs {neg_naive[0]:.1f}). A two-regime <i>hurdle</i> model (classifier "
+        f"P(price ≤ 0) × regime-specific regressors) with targeted features (renewable share, bridge days, "
+        f"solar on non-working days, negative hours at D-1/D-7) barely moves the needle: overall MAE "
+        f"{hurdle['mae_mature']:.1f}, negative-hour MAE {neg_hurdle[0]:.1f}, bias +{neg_hurdle[1]:.0f}. "
+        "The classifier is never confident enough to switch regime, and the base rate keeps rising "
+        "with solar capacity, which tree models cannot extrapolate.",
     ])
 
     S.append(Spacer(1, 4))
@@ -448,12 +470,10 @@ def build():
         "history (as-of D-1 view, including forced outages); hydro reservoir levels, interconnection "
         "capacities and the EUA carbon price are still missing. They are the likeliest sources of the "
         "missed spikes.",
-        "<b>Only a point forecast.</b> Trading and battery dispatch need distributions: quantile LightGBM "
-        "or the Temporal Fusion Transformer already implemented in the code (quantile loss), scored with "
-        "pinball loss.",
-        "<b>From forecast error to P&amp;L:</b> backtest a simple strategy, such as battery arbitrage or a "
-        "day-ahead vs intraday position, to express the MAE gain in EUR, and move to the native 15-minute "
-        "resolution.",
+        "<b>From point forecast to P&amp;L:</b> quantile forecasts (quantile LightGBM, or the Temporal Fusion "
+        "Transformer already in the code) scored with pinball loss, so that the negative-price risk is a "
+        "probability rather than a missed point; then a battery-arbitrage backtest at 15-minute resolution "
+        "to express the gain in EUR.",
     ])
     S.append(Spacer(1, 5))
     S.append(P(

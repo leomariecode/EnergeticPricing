@@ -115,6 +115,23 @@ NUCLEAR_DERIVED_FEATURES = [
 ]
 USE_NUCLEAR_DERIVED = True
 
+# Features ciblées sur les prix négatifs (10h-16h, week-ends et ponts, avril-juin) :
+#   renewable_share  : (éolien + solaire prévus) / conso prévue -> excès de fatal
+#   is_bridge        : jour de pont (entre un férié et un week-end)
+#   solar_x_offday   : solaire prévu un jour non travaillé (week-end, férié, pont)
+#   neg_hours_d1/_d7 : nb d'heures à prix <= 0 à J-1 / J-7 (épisodes en vagues)
+#   price_min_d1     : prix minimum de J-1 (profondeur du dernier épisode)
+# Les prix de J-1 sont publiés à J-2 midi : connus avant l'enchère de J.
+NEG_FEATURES = [
+    "renewable_share",
+    "is_bridge",
+    "solar_x_offday",
+    "neg_hours_d1",
+    "neg_hours_d7",
+    "price_min_d1",
+]
+USE_NEG_FEATURES = True
+
 # Capacité installée renouvelable (registre national, agrégée par département) et
 # "potentiel" de production = somme sur les départements de capacité × ressource
 # météo locale. Le potentiel estime directement la production solaire/éolienne
@@ -226,11 +243,12 @@ def model_learn(
     cap_features = _select_available(df, CAPACITY_FEATURES)
     grad_features = _select_available(df, GRADIENT_FEATURES)
     lag_features = _select_available(df, LAG_FEATURES)
+    neg_features = _select_available(df, NEG_FEATURES)
     # Features intra-heure ajoutées automatiquement par _prepare_features quand le pas est 15-min.
     subhourly = [c for c in SUBHOURLY_TEMPORAL_FEATURES if c in df.columns]
     feature_cols = (
         meteo_cols + fc_features + nb_features + gas_features + nuc_features + cap_features
-        + grad_features + lag_features + TEMPORAL_FEATURES + subhourly
+        + grad_features + lag_features + neg_features + TEMPORAL_FEATURES + subhourly
     )
     print(
         f"[model_learn] Features ({len(feature_cols)}) : "
@@ -319,7 +337,7 @@ def model_learn(
     # Modèle final : entraînement sur l'intégralité du jeu de données.
     print("[model_learn] Ré-entraînement final sur l'intégralité du jeu de données")
     model = _build_model(model_type)
-    if model_type == "LightGBM":
+    if model_type in ("LightGBM", "LightGBM_hurdle"):
         # Pour LightGBM on garde un petit holdout (10 % des derniers points) pour
         # déclencher l'early stopping et figer le bon nombre d'itérations.
         n_es = max(24, int(len(df) * 0.1))
@@ -417,8 +435,23 @@ def _compute_fold_scores(model, X_train, y_train, X_test, y_test) -> dict:
             "mae": float(mean_absolute_error(y_test, y_test_pred)),
             "rmse": float(np.sqrt(mean_squared_error(y_test, y_test_pred))),
             "n": int(len(y_test)),
+            **_negative_regime_scores(y_test, y_test_pred),
         },
     }
+
+
+def _negative_regime_scores(y_true, y_pred) -> dict:
+    # Erreur sur les heures à prix <= 0 (biais > 0 = le modèle les surestime) et
+    # sur les autres heures, pour vérifier qu'on ne dégrade pas le régime normal.
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    neg = y_true <= NEG_THRESHOLD
+    out = {"n_neg": int(neg.sum())}
+    if neg.any():
+        out["mae_neg"] = float(np.mean(np.abs(y_pred[neg] - y_true[neg])))
+        out["bias_neg"] = float(np.mean(y_pred[neg] - y_true[neg]))
+    if (~neg).any():
+        out["mae_pos"] = float(np.mean(np.abs(y_pred[~neg] - y_true[~neg])))
+    return out
 
 
 def _aggregate_cv_scores(cv_scores: dict) -> dict:
@@ -770,6 +803,9 @@ def _prepare_features(
             shifted["time"] = shifted["time"] + delta
             df = df.merge(shifted, on="time", how="left")
 
+    if USE_NEG_FEATURES:
+        df = _add_negative_price_features(df)
+
     if USE_NUCLEAR_DERIVED and "nuclear_planned_unavail" in df.columns:
         u = df[["time", "nuclear_planned_unavail"]]
         for col, delta in (("_u_1d", pd.Timedelta(days=1)), ("_u_2d", pd.Timedelta(days=2))):
@@ -819,12 +855,14 @@ def _build_model(model_type: str):
             n_jobs=-1,
             verbose=-1,
         )
+    if model_type == "LightGBM_hurdle":
+        return HurdleLGBM()
     raise ValueError(f"model_type inconnu : {model_type}")
 
 
 def _model_handles_nan(model_type: str) -> bool:
     # Seul LightGBM tolère les NaN dans X nativement ; pour les autres on impute.
-    return model_type == "LightGBM"
+    return model_type in ("LightGBM", "LightGBM_hurdle")
 
 
 def _build_feature_matrix(df: pd.DataFrame, feature_cols: list[str], model_type: str):
@@ -839,6 +877,8 @@ def _build_feature_matrix(df: pd.DataFrame, feature_cols: list[str], model_type:
 
 
 def _fit_with_validation(model, model_type, X_train, y_train, X_val, y_val):
+    if model_type == "LightGBM_hurdle":
+        return model.fit(X_train, y_train, X_val, y_val)
     if model_type == "LightGBM":
         model.fit(
             X_train, y_train,
@@ -849,3 +889,112 @@ def _fit_with_validation(model, model_type, X_train, y_train, X_val, y_val):
     else:
         model.fit(X_train, y_train)
     return model
+
+
+# ----------------------------------------------------------------------
+# Prix négatifs : features et modèle à deux étages
+# ----------------------------------------------------------------------
+NEG_THRESHOLD = 0.0  # régime "négatif" = prix <= 0 €/MWh
+
+
+def _add_negative_price_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Cf. NEG_FEATURES. df est trié par time, une ligne par pas de temps.
+    if {"wind_forecast", "solar_forecast", "load_forecast"}.issubset(df.columns):
+        renewables = df["wind_forecast"].fillna(0.0) + df["solar_forecast"].fillna(0.0)
+        df["renewable_share"] = renewables / df["load_forecast"]
+
+    dates = df["time"].dt.normalize()
+    day = pd.Series(pd.to_datetime(dates.unique()))
+    is_holiday = day.dt.date.map(lambda d: d in _FR_HOLIDAYS)
+    prev_hol = (day - pd.Timedelta(days=1)).dt.date.map(lambda d: d in _FR_HOLIDAYS)
+    next_hol = (day + pd.Timedelta(days=1)).dt.date.map(lambda d: d in _FR_HOLIDAYS)
+    # Pont : vendredi après un jeudi férié, ou lundi avant un mardi férié.
+    bridge = ((day.dt.dayofweek == 4) & prev_hol) | ((day.dt.dayofweek == 0) & next_hol)
+    bridge &= ~is_holiday
+    df["is_bridge"] = dates.map(dict(zip(day, bridge.astype(int)))).astype(int)
+
+    if "solar_forecast" in df.columns:
+        offday = (df["is_weekend"] == 1) | (df["is_bridge"] == 1)
+        df["solar_x_offday"] = df["solar_forecast"] * offday
+
+    if "price" in df.columns:
+        daily = df.groupby(dates)["price"].agg(
+            neg_hours=lambda p: float((p <= NEG_THRESHOLD).sum()) if p.notna().any() else np.nan,
+            price_min="min",
+        )
+        for lag in (1, 7):
+            shifted = daily["neg_hours"].copy()
+            shifted.index = shifted.index + pd.Timedelta(days=lag)
+            df[f"neg_hours_d{lag}"] = dates.map(shifted).values
+        shifted = daily["price_min"].copy()
+        shifted.index = shifted.index + pd.Timedelta(days=1)
+        df["price_min_d1"] = dates.map(shifted).values
+    return df
+
+
+class HurdleLGBM:
+    """Modèle à deux régimes pour les prix négatifs.
+
+    Un régresseur L2 fait la moyenne entre régimes : il place vers +10 € des heures
+    qui finissent à 0 ou en dessous. On sépare donc :
+      - un classifieur p(x) = P(prix <= 0 | x) ;
+      - un régresseur sur le régime normal (prix > 0) ;
+      - un régresseur sur le régime négatif (petit modèle, peu d'exemples).
+    Prévision = p · E[prix | négatif] + (1 - p) · E[prix | normal] : l'espérance,
+    qui minimise l'erreur quadratique comme le modèle d'origine.
+    """
+
+    def __init__(self, threshold: float = NEG_THRESHOLD, min_neg: int = 150):
+        self.threshold = threshold
+        self.min_neg = min_neg
+
+    @staticmethod
+    def _es(X_val, y_val):
+        if X_val is None or len(X_val) == 0 or len(np.unique(y_val)) < 2:
+            return {}
+        return dict(eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)])
+
+    def fit(self, X, y, X_val=None, y_val=None):
+        y = np.asarray(y)
+        neg = y <= self.threshold
+        has_val = X_val is not None and len(X_val) > 0
+        if has_val:
+            y_val = np.asarray(y_val)
+            neg_val = y_val <= self.threshold
+
+        # Probabilités non rééquilibrées (pas de class_weight) : p doit être calibré,
+        # puisqu'il pondère l'espérance.
+        self.clf_ = lgb.LGBMClassifier(
+            n_estimators=1000, learning_rate=0.03, num_leaves=31, min_data_in_leaf=30,
+            feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=5,
+            random_state=42, n_jobs=-1, verbose=-1,
+        )
+        es_clf = self._es(X_val, neg_val.astype(int)) if has_val else {}
+        self.clf_.fit(X, neg.astype(int), **es_clf)
+
+        self.pos_ = lgb.LGBMRegressor(
+            n_estimators=2000, learning_rate=0.03, num_leaves=63, min_data_in_leaf=50,
+            feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=5, reg_lambda=1.0,
+            random_state=42, n_jobs=-1, verbose=-1,
+        )
+        es_pos = self._es(X_val[~neg_val], y_val[~neg_val]) if has_val else {}
+        self.pos_.fit(X[~neg], y[~neg], **es_pos)
+
+        self.neg_ = None
+        self.neg_value_ = float(np.median(y[neg])) if neg.any() else 0.0
+        if neg.sum() >= self.min_neg:
+            self.neg_ = lgb.LGBMRegressor(
+                n_estimators=300, learning_rate=0.05, num_leaves=15, min_data_in_leaf=20,
+                random_state=42, n_jobs=-1, verbose=-1,
+            )
+            self.neg_.fit(X[neg], y[neg])
+        return self
+
+    def predict_proba_neg(self, X) -> np.ndarray:
+        return self.clf_.predict_proba(X)[:, 1]
+
+    def predict(self, X) -> np.ndarray:
+        p = self.predict_proba_neg(X)
+        neg = self.neg_.predict(X) if self.neg_ is not None else self.neg_value_
+        return p * neg + (1.0 - p) * self.pos_.predict(X)
