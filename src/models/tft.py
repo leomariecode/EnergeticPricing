@@ -27,6 +27,8 @@ from src.models.pricing_from_meteo import (
     CAPACITY_FEATURES,
     ENTSOE_FORECAST_FEATURES,
     GAS_FEATURES,
+    NUCLEAR_DERIVED_FEATURES,
+    NUCLEAR_FEATURES,
     GRADIENT_FEATURES,
     LAG_FEATURES,
     SUBHOURLY_TEMPORAL_FEATURES,
@@ -171,11 +173,12 @@ def _build_long_df(data: pd.DataFrame, meteo_mode: str, drop_missing_price: bool
     fc = _select_available(df, ENTSOE_FORECAST_FEATURES)
     nb = []  # prix voisins exclus : inconnus en prévision J-1 (cf. model_learn)
     gas = _select_available(df, GAS_FEATURES)
+    nuc = _select_available(df, NUCLEAR_FEATURES + NUCLEAR_DERIVED_FEATURES)
     cap = _select_available(df, CAPACITY_FEATURES)
     grad = _select_available(df, GRADIENT_FEATURES)
     lag = _select_available(df, LAG_FEATURES)
     subhourly = [c for c in SUBHOURLY_TEMPORAL_FEATURES if c in df.columns]
-    feature_cols = meteo_cols + fc + nb + gas + cap + grad + lag + TEMPORAL_FEATURES + subhourly
+    feature_cols = meteo_cols + fc + nb + gas + nuc + cap + grad + lag + TEMPORAL_FEATURES + subhourly
 
     # TFT n'accepte pas les NaN dans les covariables : on impute par la médiane.
     for c in feature_cols:

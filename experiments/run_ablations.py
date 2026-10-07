@@ -69,6 +69,15 @@ CONFIGS = [
          meteo_mode="national"),
     dict(name="forecast_full_l1", neighbours=False, gas=True, capacity=True,
          objective="regression_l1", models=["LightGBM"]),
+    # Parc nucléaire : production J-2 seule (sans fuite), puis + arrêts planifiés
+    # REMIT (fuite faible, cf. loader.load_nuclear_features).
+    dict(name="forecast_full_nuke_gen", neighbours=False, gas=True, capacity=True,
+         nuclear_gen=True, models=["LightGBM"]),
+    dict(name="forecast_full_nuke", neighbours=False, gas=True, capacity=True,
+         nuclear_gen=True, nuclear_planned=True, nuclear_derived=False, models=["LightGBM"]),
+    # + variations J vs J-1 et demande résiduelle thermique (cf. NUCLEAR_DERIVED_FEATURES).
+    dict(name="forecast_full_nuke_delta", neighbours=False, gas=True, capacity=True,
+         nuclear_gen=True, nuclear_planned=True, nuclear_derived=True, models=["LightGBM"]),
 ]
 
 
@@ -91,6 +100,10 @@ def _apply_config(data: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         drop.append("gas_price")
     if not cfg["capacity"]:
         drop += ["solar_capacity", "wind_capacity"]
+    if not cfg.get("nuclear_gen"):
+        drop += ["nuclear_gen_d2", "nuclear_gen_d2_trend"]
+    if not cfg.get("nuclear_planned"):
+        drop.append("nuclear_planned_unavail")
     return data.drop(columns=drop, errors="ignore")
 
 
@@ -150,7 +163,7 @@ def run():
 
     print(f"[ablation] Chargement des données {START} -> {END} (freq={FREQ})")
     t_load = time.time()
-    data = load_data(START, END, freq=FREQ)
+    data = load_data(START, END, freq=FREQ, nuclear=True)
     print(f"[ablation] {len(data)} lignes chargées en {time.time() - t_load:.0f}s\n")
 
     rows, fold_rows = [], []
@@ -171,6 +184,7 @@ def run():
         try:
             pm.MODEL_DIR = RUNS_DIR / tag
             pm._build_model = _with_objective(cfg.get("objective"))
+            pm.USE_NUCLEAR_DERIVED = cfg.get("nuclear_derived", False)
             bundle = model_learn(
                 _apply_config(data, cfg), model_type, n_splits=N_SPLITS,
                 meteo_mode=cfg.get("meteo_mode", METEO_MODE),
@@ -205,6 +219,7 @@ def run():
         finally:
             pm.MODEL_DIR = Path("results/models")
             pm._build_model = _ORIG_BUILD_MODEL
+            pm.USE_NUCLEAR_DERIVED = True
 
         rows.append(row)
         # Réécriture incrémentale : rien n'est perdu si interruption.

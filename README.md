@@ -22,6 +22,7 @@ Key takeaways:
 - **The model beats persistence by 26%** once it has seen a full seasonal cycle. With less than about a year of history it does not beat persistence.
 - **Capacity-weighted renewable potential** is the most valuable feature block. It is built from the national installation registry × local weather in each of the 96 départements.
 - **Neighbour day-ahead prices are look-ahead leakage.** They clear simultaneously with France (EUPHEMIA coupling). Including them inflates R² from 0.50 to 0.79, so they are excluded from the forecasting models.
+- **What did not help:** 2-day-lagged gas, an L1 loss, and **nuclear availability**. Nuclear output of D-2, planned outages (REMIT), their day-on-day change and the residual load left to thermal plants all scored 16.6 vs 16.5 for the main model on mature folds. The fleet changes over weeks, so its state is already reflected in yesterday's price.
 
 ## Data
 
@@ -31,6 +32,7 @@ Key takeaways:
 | [Open-Meteo](https://open-meteo.com) | Hourly weather (ERA5 archive + forecast) for the 96 départements |
 | [ODRE national registry](https://odre.opendatasoft.com/explore/dataset/registre-national-installation-production-stockage-electricite-agrege/) | Solar and wind capacity per département with commissioning dates |
 | Yahoo Finance (`TTF=F`) | TTF gas front-month, lagged 2 days |
+| ENTSO-E (nuclear) | Actual nuclear output (D-2) and planned unavailability messages (tested, not retained) |
 | INSEE, `holidays` | Population per département, French public holidays |
 
 ## Methodology
@@ -81,7 +83,7 @@ market.predict_from_meteo("2026-04-28")   # up to D+3, compared with the actual 
 ## Limitations and next steps
 
 - Historical weather is reanalysis (ERA5), not the D-1 forecast. Next step: train on archived forecast runs.
-- Nuclear availability (REMIT), hydro reservoir levels, interconnection capacities and CO2 price are not included yet.
+- The ENTSO-E API serves only the *last* revision of each REMIT unavailability message, and the archive was republished in Oct. 2025. An as-of-D-1 view of nuclear outages, including forced outages, needs a source with the full revision history. Hydro reservoir levels, interconnection capacities and CO2 price are not included yet.
 - The model only produces point forecasts. Next steps: quantile models (quantile LightGBM / TFT) scored with pinball loss, then a P&L backtest (battery arbitrage, DA vs intraday).
 
 ---

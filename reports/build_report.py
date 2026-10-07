@@ -51,6 +51,8 @@ LABELS = {
     ("LightGBM", "forecast_full_national"): "LightGBM · full, national weather",
     ("LightGBM", "forecast_full_l1"): "LightGBM · full, L1 loss",
     ("LightGBM", "reconstruction"): "LightGBM · + neighbour prices*",
+    ("LightGBM", "forecast_full_nuke_gen"): "LightGBM · full + nuclear output D-2",
+    ("LightGBM", "forecast_full_nuke_delta"): "LightGBM · full + all nuclear features",
 }
 # Lignes de la figure 1 (les Ridge divergents restent dans le tableau).
 FIG1_ROWS = [
@@ -58,6 +60,7 @@ FIG1_ROWS = [
     ("Simple", "forecast_base"), ("Simple", "forecast_nocap"),
     ("LightGBM", "forecast_base"), ("LightGBM", "forecast_nocap"),
     ("LightGBM", "forecast_full_national"), ("LightGBM", "forecast_full_l1"),
+    ("LightGBM", "forecast_full_nuke_delta"),
     ("LightGBM", "forecast_full"), ("LightGBM", "reconstruction"),
 ]
 
@@ -88,7 +91,7 @@ def fig_mae(summary: pd.DataFrame, path: Path):
     d = summary.set_index(["model", "config"]).loc[FIG1_ROWS].reset_index()
     y = np.arange(len(d))
     h = 0.38
-    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    fig, ax = plt.subplots(figsize=(7.2, 3.4))
     ax.barh(y + h / 2, d["mae_all"], height=h - 0.04, color="#a9c8ef", label="All 5 folds")
     ax.barh(y - h / 2, d["mae_mature"], height=h - 0.04, color=BLUE,
             label=f"Folds with ≥ {MATURE_MONTHS} months of training data")
@@ -104,7 +107,7 @@ def fig_mae(summary: pd.DataFrame, path: Path):
     ax.set_xlabel("Out-of-sample MAE (EUR/MWh)", fontsize=8, color=INK2)
     _style_axes(ax, grid_axis="x")
     ax.tick_params(axis="y", labelsize=7.5, colors=INK)
-    ax.legend(fontsize=7.5, frameon=False, loc="upper right")
+    ax.legend(fontsize=7.5, frameon=False, loc="lower right", bbox_to_anchor=(1, 1), ncol=2)
     fig.tight_layout()
     fig.savefig(path, dpi=220)
     plt.close(fig)
@@ -117,7 +120,7 @@ def fig_week(tag: str, path: Path, days: int = 14):
     # Fenêtre de 2 semaines la plus volatile du dernier pli.
     end = lf["y_true"].rolling(f"{days}D").std().idxmax()
     w = lf.loc[end - pd.Timedelta(days=days):end]
-    fig, ax = plt.subplots(figsize=(7.2, 2.2))
+    fig, ax = plt.subplots(figsize=(7.2, 1.95))
     ax.plot(w.index, w["y_true"], color=INK, linewidth=1.2, label="Actual day-ahead price")
     ax.plot(w.index, w["y_pred"], color=BLUE, linewidth=1.2,
             label="LightGBM forecast (ex-ante information only)")
@@ -135,7 +138,7 @@ def fig_week(tag: str, path: Path, days: int = 14):
 
 def fig_importance(tag: str, path: Path, top: int = 10):
     imp = pd.read_csv(RES / f"importance_{tag}.csv").head(top).iloc[::-1]
-    fig, ax = plt.subplots(figsize=(7.2, 2.3))
+    fig, ax = plt.subplots(figsize=(7.2, 1.95))
     ax.barh(imp["group"], 100 * imp["share"], color=BLUE, height=0.6)
     for yi, v in enumerate(100 * imp["share"]):
         ax.text(v + 0.5, yi, f"{v:.1f}%", va="center", fontsize=7.5, color=INK)
@@ -153,7 +156,7 @@ def fig_folds(folds: pd.DataFrame, path: Path):
         (("Simple", "forecast_nocap"), ORANGE, "Ridge (best linear)"),
         (("LightGBM", "forecast_full"), BLUE, "LightGBM (main model)"),
     ]
-    fig, ax = plt.subplots(figsize=(7.2, 2.3))
+    fig, ax = plt.subplots(figsize=(7.2, 2.05))
     width = 0.26
     labels = None
     for k, ((m, c), col, lab) in enumerate(series):
@@ -213,6 +216,9 @@ def build():
     nat = row("LightGBM", "forecast_full_national")
     l1 = row("LightGBM", "forecast_full_l1")
     ridge = row("Simple", "forecast_nocap")
+    nuke_gen = row("LightGBM", "forecast_full_nuke_gen")
+    nuke = row("LightGBM", "forecast_full_nuke_delta")
+    imp_nuke = pd.read_csv(RES / "importance_LightGBM_forecast_full_nuke_delta.csv").set_index("group")["share"]
     skill_mature = 1 - best["mae_mature"] / naive1["mae_mature"]
     skill_all = 1 - best["mae_all"] / naive1["mae_all"]
     n_mature = int(folds.loc[folds["model"] == "naive_D-1", "mature"].sum())
@@ -322,6 +328,9 @@ def build():
          "radiation (solar) or × wind speed<super>3</super> (wind)"],
         ["ICE Endex TTF front-month (via Yahoo Finance)", "Natural-gas price (EUR/MWh)", "Daily close",
          "Marginal-cost proxy, lagged 2 days (last settlement known at gate closure)"],
+        ["ENTSO-E · nuclear", "Actual nuclear output; planned unavailability messages (REMIT)",
+         "Hourly · per event", "Output of D-2, planned outage MW at D, their change vs D-1, "
+         "residual load net of available nuclear (tested, not retained)"],
         ["INSEE · French calendar", "Population by département · public holidays",
          "Static · daily", "Population-weighted national weather; holidays treated as weekends"],
     ], [3.4 * cm, 5.0 * cm, 2.9 * cm, 5.9 * cm]))
@@ -333,7 +342,7 @@ def build():
     S.append(P("3 · Methodology", h2))
     S += B([
         "<b>No look-ahead.</b> Each feature is checked against what is known at D-1 noon: price lags at "
-        "D-1 and D-7, gas settlement of D-2, ENTSO-E day-ahead forecasts, calendar. Neighbour DA prices clear "
+        "D-1 and D-7, gas settlement of D-2, nuclear output of D-2, ENTSO-E day-ahead forecasts, calendar. Neighbour DA prices clear "
         "<i>simultaneously</i> with France, so they are excluded from all forecasting models and kept only "
         "in a <i>reconstruction</i> run that shows how large this leak is.",
         "<b>Features from market structure:</b> residual-load forecast and hour-to-hour ramps (morning and "
@@ -361,6 +370,7 @@ def build():
              ("Simple", "forecast_nocap"), ("Simple", "forecast_full"),
              ("LightGBM", "forecast_base"), ("LightGBM", "forecast_nocap"),
              ("LightGBM", "forecast_full_national"), ("LightGBM", "forecast_full_l1"),
+             ("LightGBM", "forecast_full_nuke_gen"), ("LightGBM", "forecast_full_nuke_delta"),
              ("LightGBM", "forecast_full"), ("LightGBM", "reconstruction")]
     tab = [["Model · features", "MAE, all folds", f"MAE, ≥ {MATURE_MONTHS} mo", "R², all folds",
             f"R², ≥ {MATURE_MONTHS} mo"]]
@@ -390,6 +400,13 @@ def build():
         f"{nocap['mae_mature']:.1f} with) and an L1 loss ({l1['mae_mature']:.1f}). A Ridge on weather "
         f"and ENTSO-E forecasts is a strong linear baseline ({ridge['mae_mature']:.1f}); LightGBM's edge "
         "comes from using the capacity features, which make the linear model unstable.",
+        f"<b>Nuclear availability adds nothing over yesterday's price (2024-2026).</b> Nuclear output of "
+        f"D-2, planned outages, their day-on-day change and the residual load left to thermal plants "
+        f"({nuke_gen['mae_mature']:.2f} / {nuke['mae_mature']:.2f} vs {best['mae_mature']:.2f}). The model "
+        f"uses the thermal residual load ({100 * imp_nuke.get('thermal_residual', 0):.0f}% of gain) but as a "
+        "substitute for residual load: the fleet moves over weeks, so its state is already priced in D-1. "
+        "Caveat: ENTSO-E only serves the <i>last</i> revision of each REMIT message, republished in Oct. 2025, "
+        "so forced outages were excluded to avoid look-ahead.",
         f"<b>Neighbour prices are a leakage trap.</b> Adding them drops the MAE to {recon['mae_all']:.1f} "
         "and a single coupled neighbour (Belgium) takes most of the model's importance. Results that include "
         "such features overstate what can be achieved before the auction. This project's own first version "
@@ -399,7 +416,7 @@ def build():
         f"of hours outside the 5–95% band, with {100 * best['spike_precision']:.0f}% precision.",
     ])
 
-    S.append(PageBreak())
+    S.append(Spacer(1, 4))
     S.append(KeepTogether([
         img(FIG / "folds.png"),
         P("Figure 2 – MAE per test fold, with the length of the training window. The model needs a full "
@@ -427,9 +444,10 @@ def build():
         "<b>Weather is reanalysis, not forecast.</b> Historical weather is ERA5 (what actually happened), "
         "whereas a live model sees D-1 weather forecasts, so backtest errors are slightly optimistic. Next "
         "step: train on archived forecast runs (Open-Meteo historical forecasts, ECMWF).",
-        "<b>Supply-side fundamentals are missing:</b> nuclear availability (REMIT unavailability messages, "
-        "the main French driver), hydro reservoir levels, interconnection capacities, EUA carbon price. "
-        "These are the most likely sources of the remaining error and of the missed spikes.",
+        "<b>Point-in-time fundamentals:</b> nuclear features need a REMIT feed with the full revision "
+        "history (as-of D-1 view, including forced outages); hydro reservoir levels, interconnection "
+        "capacities and the EUA carbon price are still missing. They are the likeliest sources of the "
+        "missed spikes.",
         "<b>Only a point forecast.</b> Trading and battery dispatch need distributions: quantile LightGBM "
         "or the Temporal Fusion Transformer already implemented in the code (quantile loss), scored with "
         "pinball loss.",

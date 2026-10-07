@@ -95,6 +95,26 @@ GAS_FEATURES = [
     "gas_price",
 ]
 
+# Parc nucléaire (cf. loader.load_nuclear_features) : production moyenne de J-2
+# et sa tendance hebdo (aucune fuite), MW en arrêt planifié à l'heure h (fuite
+# faible : seules les prolongations d'arrêts déjà annoncés sont connues ex post).
+NUCLEAR_FEATURES = [
+    "nuclear_gen_d2",
+    "nuclear_gen_d2_trend",
+    "nuclear_planned_unavail",
+]
+
+# Dérivées du nucléaire : ce que le prix de la veille ne peut pas contenir.
+#   nuclear_unavail_delta_1d : variation des arrêts planifiés J vs J-1 (même heure)
+#   thermal_residual         : demande résiduelle - nucléaire disponible estimé
+#                              (= production J-2 corrigée des arrêts planifiés
+#                              intervenus depuis J-2) -> ce qui reste au gaz/charbon.
+NUCLEAR_DERIVED_FEATURES = [
+    "nuclear_unavail_delta_1d",
+    "thermal_residual",
+]
+USE_NUCLEAR_DERIVED = True
+
 # Capacité installée renouvelable (registre national, agrégée par département) et
 # "potentiel" de production = somme sur les départements de capacité × ressource
 # météo locale. Le potentiel estime directement la production solaire/éolienne
@@ -202,19 +222,20 @@ def model_learn(
         _select_available(df, NEIGHBOUR_PRICE_FEATURES) if use_neighbour_prices else []
     )
     gas_features = _select_available(df, GAS_FEATURES)
+    nuc_features = _select_available(df, NUCLEAR_FEATURES + NUCLEAR_DERIVED_FEATURES)
     cap_features = _select_available(df, CAPACITY_FEATURES)
     grad_features = _select_available(df, GRADIENT_FEATURES)
     lag_features = _select_available(df, LAG_FEATURES)
     # Features intra-heure ajoutées automatiquement par _prepare_features quand le pas est 15-min.
     subhourly = [c for c in SUBHOURLY_TEMPORAL_FEATURES if c in df.columns]
     feature_cols = (
-        meteo_cols + fc_features + nb_features + gas_features + cap_features
+        meteo_cols + fc_features + nb_features + gas_features + nuc_features + cap_features
         + grad_features + lag_features + TEMPORAL_FEATURES + subhourly
     )
     print(
         f"[model_learn] Features ({len(feature_cols)}) : "
         f"météo={len(meteo_cols)} ({meteo_tag}), forecasts={fc_features}, voisins={nb_features}, "
-        f"gaz={gas_features}, capacité={cap_features}, gradients={grad_features}, "
+        f"gaz={gas_features}, nucléaire={nuc_features}, capacité={cap_features}, gradients={grad_features}, "
         f"lags={lag_features}, temporel={len(TEMPORAL_FEATURES)}, intra-heure={subhourly}"
     )
     print(f"[model_learn] {len(df)} lignes d'entraînement après filtrage")
@@ -673,8 +694,9 @@ def _prepare_features(
     available_fc = [c for c in ("load_forecast", "wind_forecast", "solar_forecast") if c in data.columns]
     available_nb = [c for c in NEIGHBOUR_PRICE_FEATURES if c in data.columns]
     available_gas = [c for c in GAS_FEATURES if c in data.columns]
+    available_nuc = [c for c in NUCLEAR_FEATURES if c in data.columns]
     national_cols = (
-        available_fc + available_nb + available_gas
+        available_fc + available_nb + available_gas + available_nuc
         + (["price"] if "price" in data.columns else [])
     )
 
@@ -747,6 +769,18 @@ def _prepare_features(
             shifted = df[["time", "price"]].rename(columns={"price": lag_col}).copy()
             shifted["time"] = shifted["time"] + delta
             df = df.merge(shifted, on="time", how="left")
+
+    if USE_NUCLEAR_DERIVED and "nuclear_planned_unavail" in df.columns:
+        u = df[["time", "nuclear_planned_unavail"]]
+        for col, delta in (("_u_1d", pd.Timedelta(days=1)), ("_u_2d", pd.Timedelta(days=2))):
+            shifted = u.rename(columns={"nuclear_planned_unavail": col}).copy()
+            shifted["time"] = shifted["time"] + delta
+            df = df.merge(shifted, on="time", how="left")
+        df["nuclear_unavail_delta_1d"] = df["nuclear_planned_unavail"] - df["_u_1d"]
+        if {"net_load_forecast", "nuclear_gen_d2"}.issubset(df.columns):
+            nuclear_avail = df["nuclear_gen_d2"] - (df["nuclear_planned_unavail"] - df["_u_2d"])
+            df["thermal_residual"] = df["net_load_forecast"] - nuclear_avail
+        df = df.drop(columns=["_u_1d", "_u_2d"])
 
     df = df.replace([np.inf, -np.inf], np.nan)
     # On droppe les pas de temps entièrement vides côté météo (how='all' : en mode

@@ -66,7 +66,7 @@ def _find_covering_cache(cache_dir: Path, prefix: str, start: str, end: str) -> 
     return df.loc[(df["time"] >= s_ts) & (df["time"] <= e_ts)].reset_index(drop=True)
 
 
-def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
+def load_data(start: str, end: str, freq: str = "1h", nuclear: bool = False) -> pd.DataFrame:
     # start / end au format ISO "YYYY-MM-DD" ; freq = "1h" ou "15min".
     # Pour "15min" : prix et forecasts ENTSO-E gardés en 15-min natifs (post-oct 2025)
     # ou upsamplés par ffill (avant). La météo (toujours fetchée en horaire) est
@@ -156,6 +156,14 @@ def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
     print("[load_data] Chargement du prix du gaz (TTF)")
     df_gas = load_gas_price(start, end, freq=freq)
 
+    # Nucléaire : optionnel (téléchargement REMIT lent, et sans gain mesuré sur
+    # 2024-2026, cf. experiments/run_ablations.py).
+    if nuclear:
+        print("[load_data] Chargement des features nucléaires (production J-2, arrêts planifiés)")
+        df_nuc = load_nuclear_features(start, end, freq=freq)
+    else:
+        df_nuc = pd.DataFrame({"time": pd.Series(dtype="datetime64[ns]")})
+
     # Left-merge depuis la météo : on garde toutes les heures pour lesquelles on a la météo,
     # le prix peut être NaN (typiquement les heures les plus récentes que l'ENTSO-E
     # n'a pas encore publiées). On veut pouvoir prédire ces heures-là.
@@ -169,6 +177,7 @@ def load_data(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
         .merge(df_fc, on="time", how="left")
         .merge(df_nb, on="time", how="left")
         .merge(df_gas, on="time", how="left")
+        .merge(df_nuc, on="time", how="left")
     )
 
     n_price = df["price"].notna().sum()
@@ -419,6 +428,156 @@ def _load_gas_price_raw(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
             f" ({len(out)} points {freq}) — cache écrit : {cache_path.name}"
         )
     return out
+
+
+# ----------------------------------------------------------------------
+# Nucléaire
+# ----------------------------------------------------------------------
+# Deux sources ENTSO-E, avec des garanties différentes sur la fuite d'information :
+#  - la production nucléaire réalisée : celle de J-2 est publiée avant l'enchère
+#    de J-1 midi -> aucune fuite. Le parc bouge lentement (arrêts de plusieurs
+#    semaines), donc J-2 est un bon proxy de la disponibilité à J.
+#  - les messages d'indisponibilité (REMIT) : l'API ne sert que la DERNIÈRE révision
+#    de chaque message, et le stock a été republié (created_doc_time ≈ oct. 2025
+#    même pour 2023) -> impossible de reconstituer ce qui était connu la veille.
+#    On ne garde donc que les arrêts PLANIFIÉS (annoncés des semaines à l'avance) ;
+#    seules leurs prolongations fuitent. Les arrêts fortuits sont exclus.
+NUCLEAR_CACHE_DIR = DATA_DIR / "cache" / "nuclear"
+
+
+def load_nuclear_features(start: str, end: str, freq: str = "1h") -> pd.DataFrame:
+    # Renvoie 'time, nuclear_gen_d2, nuclear_gen_d2_trend, nuclear_planned_unavail'
+    # au pas freq. Les colonnes manquantes (API indisponible) sont simplement absentes.
+    step = "15min" if freq == "15min" else "1h"
+    full_idx = pd.date_range(
+        start, pd.Timestamp(end) + pd.Timedelta(days=1), freq=step, inclusive="left"
+    )
+    out = pd.DataFrame({"time": full_idx})
+
+    gen = _nuclear_generation_daily(start, end)
+    if gen is not None:
+        # Moyenne journalière de J-2 et sa variation sur une semaine (J-2 vs J-9).
+        feats = pd.DataFrame({
+            "date": gen.index + pd.Timedelta(days=2),
+            "nuclear_gen_d2": gen.values,
+            "nuclear_gen_d2_trend": (gen - gen.shift(7, freq="D").reindex(gen.index)).values,
+        })
+        out["date"] = out["time"].dt.normalize()
+        out = out.merge(feats, on="date", how="left").drop(columns="date")
+
+    unavail = _nuclear_planned_unavailability(start, end)
+    if unavail is not None:
+        hourly = unavail.reindex(pd.date_range(full_idx.min().floor("h"),
+                                               full_idx.max().floor("h"), freq="1h"),
+                                 fill_value=0.0)
+        out["nuclear_planned_unavail"] = hourly.reindex(out["time"].dt.floor("h")).values
+    return out
+
+
+def _nuclear_generation_daily(start: str, end: str) -> pd.Series | None:
+    # Production nucléaire FR (MW), moyenne journalière en heure locale Paris.
+    # On remonte 10 jours avant start pour disposer de J-2 et J-9 dès le premier jour.
+    NUCLEAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    covering = _find_covering_cache(NUCLEAR_CACHE_DIR, "gen", fetch_start, end)
+    if covering is None:
+        print(f"[load_nuclear] Production nucléaire ENTSO-E : {fetch_start} -> {end}")
+        client = EntsoePandasClient(api_key=ENTSOE_TOKEN)
+        try:
+            g = client.query_generation(
+                "FR",
+                start=pd.Timestamp(fetch_start, tz="Europe/Paris"),
+                end=pd.Timestamp(end, tz="Europe/Paris") + pd.Timedelta(days=1),
+                psr_type="B14",  # B14 = nucléaire
+            )
+        except Exception as exc:
+            print(f"[load_nuclear] production indisponible ({exc})")
+            return None
+        if isinstance(g, pd.DataFrame):
+            g = g.iloc[:, 0]
+        g = g.resample("1h").mean()
+        g.index = g.index.tz_convert("Europe/Paris").tz_localize(None)
+        covering = pd.DataFrame({"time": g.index, "nuclear_gen": g.values})
+        covering.to_parquet(NUCLEAR_CACHE_DIR / f"gen_{fetch_start}_{end}.parquet", index=False)
+    s = covering.set_index("time")["nuclear_gen"]
+    return s.resample("D").mean()
+
+
+def _nuclear_planned_unavailability(start: str, end: str) -> pd.Series | None:
+    # MW nucléaires en arrêt planifié, par heure. Un même réacteur peut apparaître
+    # dans plusieurs messages qui se chevauchent : on prend le max par réacteur et
+    # par heure, puis on somme sur le parc.
+    NUCLEAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = NUCLEAR_CACHE_DIR / f"unavail_{start}_{end}.parquet"
+    if cache_path.exists():
+        msgs = pd.read_parquet(cache_path)
+    else:
+        msgs = _fetch_nuclear_unavailability_messages(start, end)
+        if msgs is None:
+            return None
+        msgs.to_parquet(cache_path, index=False)
+
+    msgs = msgs[(msgs["businesstype"] == "Planned maintenance")
+                & (msgs["docstatus"].fillna("") != "Cancelled")]
+    lo = pd.Timestamp(start)
+    hi = pd.Timestamp(end) + pd.Timedelta(days=1)
+    rows = []
+    for m in msgs.itertuples(index=False):
+        s, e = max(m.start, lo), min(m.end, hi)
+        if s >= e:
+            continue
+        hours = pd.date_range(s.floor("h"), e, freq="1h", inclusive="left")
+        mw = float(m.nominal_power) - float(m.avail_qty)
+        rows.append(pd.DataFrame({"unit": m.production_resource_name, "time": hours, "mw": mw}))
+    if not rows:
+        return pd.Series(dtype=float)
+    per_unit = pd.concat(rows).groupby(["unit", "time"])["mw"].max()
+    total = per_unit.groupby("time").sum().clip(lower=0.0)
+    print(f"[load_nuclear] Arrêts planifiés : {len(msgs)} messages, "
+          f"moyenne {total.mean():.0f} MW indisponibles")
+    return total
+
+
+def _fetch_nuclear_unavailability_messages(start: str, end: str) -> pd.DataFrame | None:
+    # Requêtes mois par mois (l'API plafonne le nombre de documents par appel et
+    # répond lentement) ; chaque mois est mis en cache pour pouvoir reprendre.
+    client = EntsoePandasClient(api_key=ENTSOE_TOKEN)
+    month_dir = NUCLEAR_CACHE_DIR / "unavail_months"
+    month_dir.mkdir(parents=True, exist_ok=True)
+    months = pd.date_range(pd.Timestamp(start).replace(day=1), end, freq="MS")
+    parts = []
+    for m0 in months:
+        month_path = month_dir / f"{m0:%Y-%m}.pkl"
+        if month_path.exists():
+            parts.append(pd.read_pickle(month_path))
+            continue
+        m1 = m0 + pd.offsets.MonthBegin(1)
+        print(f"[load_nuclear] Indisponibilités {m0:%Y-%m}")
+        try:
+            u = client.query_unavailability_of_generation_units(
+                "FR", start=pd.Timestamp(m0, tz="Europe/Paris"),
+                end=pd.Timestamp(m1, tz="Europe/Paris"), docstatus=None,
+            )
+        except Exception as exc:
+            print(f"[load_nuclear] {m0:%Y-%m} indisponible ({exc})")
+            continue
+        nuclear = u[u["plant_type"] == "Nuclear"].reset_index()
+        if m1 <= pd.Timestamp.today().normalize():  # mois en cours : pas de cache (incomplet)
+            nuclear.to_pickle(month_path)
+        parts.append(nuclear)
+    if not parts:
+        return None
+    msgs = pd.concat(parts, ignore_index=True)
+    # Un message chevauchant plusieurs mois est renvoyé plusieurs fois : on garde
+    # sa révision la plus récente.
+    msgs = msgs.sort_values("revision").drop_duplicates("mrid", keep="last")
+    for col in ("start", "end"):
+        msgs[col] = pd.to_datetime(msgs[col], utc=True).dt.tz_convert("Europe/Paris").dt.tz_localize(None)
+    msgs["avail_qty"] = pd.to_numeric(msgs["avail_qty"], errors="coerce").fillna(0.0)
+    msgs["nominal_power"] = pd.to_numeric(msgs["nominal_power"], errors="coerce")
+    keep = ["mrid", "revision", "businesstype", "docstatus", "production_resource_name",
+            "nominal_power", "avail_qty", "start", "end"]
+    return msgs[keep].dropna(subset=["nominal_power"]).reset_index(drop=True)
 
 
 # Filières du registre national retenues, et nom de la colonne de capacité produite.
